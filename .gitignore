@@ -1,0 +1,39 @@
+# Ambiente virtual
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Credenciais (NUNCA commitar)
+.env
+.env.*
+credenciais.json
+*.seed
+
+# Playwright
+/tmp/pje_session/
+playwright-report/
+test-results/
+
+# PDFs e documentos baixados durante debug
+*.pdf
+/tmp/processo_*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
