@@ -12,6 +12,7 @@ Funcionalidades:
 import asyncio
 import io
 import re
+import sys
 import time
 
 import pdfplumber
@@ -21,10 +22,15 @@ from playwright.async_api import async_playwright
 URL_BASE = "https://pje.tjpi.jus.br/1g"
 
 
+def _log(msg: str) -> None:
+    """Loga em stderr (stdout quebra o transporte stdio do MCP)."""
+    print(msg, file=sys.stderr, flush=True)
+
+
 class PJeClient:
     """Cliente para automatizar consultas ao PJe-TJPI - 1o Grau."""
 
-    def __init__(self, cpf, senha, totp_seed, persona="advogado", headless=True):
+    def __init__(self, cpf, senha, totp_seed, persona="advogado", headless=False):
         """Inicializa o cliente.
 
         Args:
@@ -32,7 +38,10 @@ class PJeClient:
             senha: Senha do PDPJ
             totp_seed: Seed TOTP em Base32 (gerada ao configurar 2FA)
             persona: "advogado" (default) ou "procurador"
-            headless: True para rodar sem interface, False para visualizar
+            headless: False (default) - HEADED necessario porque o PJe-TJPI bloqueia
+                Chromium headless. Mesmo padrao do MCP SEI. Patchright + Chrome real
+                + HEADED contorna a deteccao. O singleton mantem 1 janela aberta por
+                ate 5min, entao nao fica piscando entre tool calls.
         """
         self.cpf = cpf
         self.senha = senha
@@ -50,6 +59,8 @@ class PJeClient:
         self._context = None
         self._page = None
         self._ultimo_processo_foi_terceiro = False
+        self._ultimo_processo_id = None  # ID interno do PJe extraido da URL dos autos
+        self._ultimo_processo_ca = None  # Codigo de autenticacao da sessao (URL dos autos)
 
     async def __aenter__(self):
         await self._iniciar()
@@ -63,7 +74,12 @@ class PJeClient:
     # ========== SETUP / TEARDOWN ==========
 
     async def _iniciar(self):
-        """Inicia o browser Playwright."""
+        """Inicia o browser Playwright.
+
+        IMPORTANTE: roda HEADED (headless=False) por default porque o PJe-TJPI
+        bloqueia Chromium headless. Singleton mantem 1 janela aberta por ate 5min,
+        entao nao fica piscando entre tool calls.
+        """
         self._pw = await async_playwright().start()
         self._browser = await self._pw.chromium.launch(headless=self.headless)
         self._context = await self._browser.new_context(
@@ -79,7 +95,7 @@ class PJeClient:
         """Aceita automaticamente qualquer dialog de confirmacao do PJe."""
         async def handle_dialog(dialog):
             msg = dialog.message[:200]
-            print(f"[DIALOG] Aceitando: {msg[:100]}...")
+            _log(f"[DIALOG] Aceitando: {msg[:100]}...")
             # Resolucao CNJ 121 = processo de terceiro
             if "Resolução" in msg or "121" in msg or "não faz parte" in msg:
                 self._ultimo_processo_foi_terceiro = True
@@ -89,9 +105,15 @@ class PJeClient:
     async def _fechar(self):
         """Fecha browser e Playwright."""
         if self._browser:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
         if self._pw:
-            await self._pw.stop()
+            try:
+                await self._pw.stop()
+            except Exception:
+                pass
 
     # ========== LOGIN E TROCA DE PERFIL ==========
 
@@ -103,19 +125,37 @@ class PJeClient:
         return self.totp.now()
 
     async def _login(self):
-        """Faz login no SSO do CNJ com CPF + senha + TOTP."""
-        print("[LOGIN] Iniciando...")
-        await self._page.goto(f"{URL_BASE}/login.seam", wait_until="networkidle")
+        """Faz login no SSO do CNJ com CPF + senha + TOTP.
+
+        Se ja existe sessao valida nos cookies (profile persistente), pula o
+        formulario de login - basta navegar pra login.seam e o PJe redireciona
+        direto pro painel.
+        """
+        _log(f"[LOGIN] Iniciando...")
+        await self._page.goto(f"{URL_BASE}/login.seam", wait_until="domcontentloaded")
+        await asyncio.sleep(1)
+
+        # Se ja esta logado, login.seam redireciona pro painel ou mostra a mesma pagina
+        # mas SEM o formulario de login. Detecta verificando se input#username existe.
+        try:
+            await self._page.wait_for_selector("input#username", timeout=3000)
+            tem_form_login = True
+        except Exception:
+            tem_form_login = False
+
+        if not tem_form_login:
+            url_atual = self._page.url
+            _log(f"[LOGIN] Ja logado (sessao em cache). URL atual: {url_atual}")
+            return
 
         # CPF + senha
-        await self._page.wait_for_selector("input#username", timeout=15000)
         await self._page.fill("input#username", self.cpf)
         await self._page.fill("input#password", self.senha)
         try:
             await self._page.click("input#kc-login", timeout=3000)
         except Exception:
             await self._page.click("button[type='submit']")
-        await self._page.wait_for_load_state("networkidle", timeout=15000)
+        await self._page.wait_for_load_state("domcontentloaded", timeout=15000)
 
         # 2FA
         codigo = self._codigo_totp()
@@ -125,19 +165,32 @@ class PJeClient:
             await self._page.click("input#kc-login", timeout=2000)
         except Exception:
             await self._page.click("button[type='submit']")
-        await self._page.wait_for_load_state("networkidle", timeout=30000)
-        print("[LOGIN] OK")
+        await self._page.wait_for_load_state("domcontentloaded", timeout=30000)
+        _log(f"[LOGIN] OK")
 
     async def _trocar_perfil(self):
-        """Abre o dropdown do usuario e troca para a persona desejada."""
-        print(f"[PERFIL] Trocando para perfil: {self.persona}")
+        """Abre o dropdown do usuario e troca para a persona desejada.
+
+        Tolerante: se nao achar o dropdown ou o link da persona, assume que
+        ja esta no perfil correto (sessao em cache).
+        """
+        _log(f"[PERFIL] Trocando para perfil: {self.persona}")
         await asyncio.sleep(2)
 
         # Abre o dropdown do menu do usuario
-        try:
-            await self._page.click("li.menu-usuario a.dropdown-toggle", timeout=5000)
-        except Exception:
-            await self._page.click("a.dropdown-toggle", timeout=3000)
+        clicou_dropdown = False
+        for sel in ["li.menu-usuario a.dropdown-toggle", "a.dropdown-toggle"]:
+            try:
+                await self._page.click(sel, timeout=4000)
+                clicou_dropdown = True
+                break
+            except Exception:
+                continue
+
+        if not clicou_dropdown:
+            _log(f"[PERFIL] Dropdown nao encontrado - assumindo perfil ja correto")
+            return
+
         await asyncio.sleep(1)
 
         # Clica no link da persona correta
@@ -155,26 +208,27 @@ class PJeClient:
         clicou = False
         for sel in seletores:
             try:
-                await self._page.click(sel, timeout=5000)
+                await self._page.click(sel, timeout=4000)
                 clicou = True
                 break
             except Exception:
                 continue
 
         if not clicou:
-            raise Exception(f"Nao consegui trocar para perfil {self.persona}")
+            _log(f"[PERFIL] Link {self.persona} nao encontrado - perfil pode ja estar correto")
+            return
 
-        await self._page.wait_for_load_state("networkidle", timeout=15000)
-        print(f"[PERFIL] OK - persona: {self.persona}")
+        await self._page.wait_for_load_state("domcontentloaded", timeout=15000)
+        _log(f"[PERFIL] OK - persona: {self.persona}")
 
     # ========== EXPEDIENTES PENDENTES ==========
 
     async def expedientes_pendentes(self):
         """Lista expedientes pendentes de ciencia/resposta."""
-        print("[EXP] Navegando pro painel...")
+        _log(f"[EXP] Navegando pro painel...")
         await self._page.goto(
             f"{URL_BASE}/Painel/painel_usuario/advogado.seam",
-            wait_until="networkidle"
+            wait_until="domcontentloaded"
         )
         await asyncio.sleep(3)
 
@@ -272,10 +326,10 @@ class PJeClient:
     async def _abrir_autos_processo(self, numero_cnj):
         """Busca pelo numero CNJ e abre os autos. Retorna a page dos autos."""
         self._ultimo_processo_foi_terceiro = False
-        print(f"[PROC] Buscando {numero_cnj}...")
+        _log(f"[PROC] Buscando {numero_cnj}...")
         await self._page.goto(
             f"{URL_BASE}/Processo/ConsultaProcesso/listView.seam",
-            wait_until="networkidle"
+            wait_until="domcontentloaded"
         )
         await asyncio.sleep(2)
 
@@ -292,13 +346,13 @@ class PJeClient:
             so_digitos[14:16],  # TR (pula o J fixo)
             so_digitos[16:20],  # OOOO
         ]
-        print(f"[PROC] Partes do numero: {partes}")
+        _log(f"[PROC] Partes do numero: {partes}")
 
         # PJe-TJPI tem 6 campos de input; os campos J e TR ja vem preenchidos
         inputs = await self._page.query_selector_all(
             "input[id*='numeroProcesso']"
         )
-        print(f"[PROC] Campos encontrados: {len(inputs)}")
+        _log(f"[PROC] Campos encontrados: {len(inputs)}")
 
         if len(inputs) >= 6:
             await inputs[0].fill(partes[0])  # N: 0801447
@@ -306,7 +360,7 @@ class PJeClient:
             await inputs[2].fill(partes[2])  # AAAA: 2024
             # Pula indice 3 (J) e 4 (TR) - ja vem preenchidos
             await inputs[5].fill(partes[4])  # OOOO: 0037
-            print(f"[PROC] Preencheu: N={partes[0]} DD={partes[1]} AAAA={partes[2]} OOOO={partes[4]}")
+            _log(f"[PROC] Preencheu: N={partes[0]} DD={partes[1]} AAAA={partes[2]} OOOO={partes[4]}")
         elif len(inputs) >= 5:
             for i, valor in enumerate(partes):
                 await inputs[i].fill(valor)
@@ -327,7 +381,7 @@ class PJeClient:
             except Exception:
                 continue
 
-        await self._page.wait_for_load_state("networkidle", timeout=15000)
+        await self._page.wait_for_load_state("domcontentloaded", timeout=15000)
         await asyncio.sleep(2)
 
         # Clica no link do processo no resultado
@@ -349,9 +403,27 @@ class PJeClient:
         # Autos podem abrir em nova aba - pega a ultima
         paginas = self._context.pages
         aba_autos = paginas[-1]
-        await aba_autos.wait_for_load_state("networkidle", timeout=15000)
+        await aba_autos.wait_for_load_state("domcontentloaded", timeout=15000)
         await asyncio.sleep(2)
-        print(f"[PROC] Autos abertos em: {aba_autos.url}")
+        _log(f"[PROC] Autos abertos em: {aba_autos.url}")
+
+        # Extrai processo_id e codigo de autenticacao da URL dos autos
+        # URL real: .../listProcessoCompletoAdvogado.seam?id=1660665&ca=4e624ca28cbd...
+        # (parametro 'id' e nao 'idProcesso'; 'ca' e codigo de autenticacao da sessao)
+        m_pid = re.search(r"[?&]id=(\d+)", aba_autos.url)
+        if m_pid:
+            self._ultimo_processo_id = m_pid.group(1)
+            _log(f"[PROC] processo_id={self._ultimo_processo_id}")
+        else:
+            _log(f"[PROC] AVISO: nao consegui extrair id da URL: {aba_autos.url}")
+
+        m_ca = re.search(r"[?&]ca=([0-9a-f]+)", aba_autos.url)
+        if m_ca:
+            self._ultimo_processo_ca = m_ca.group(1)
+            _log(f"[PROC] ca={self._ultimo_processo_ca[:20]}...")
+        else:
+            self._ultimo_processo_ca = None
+
         return aba_autos
 
     async def buscar_processo(self, numero_cnj):
@@ -495,10 +567,10 @@ class PJeClient:
         campo: 'nome_parte', 'nome_advogado', 'cpf', 'cnpj', 'oab'
         valor: str (ou tupla (numero, uf) para OAB)
         """
-        print(f"[BUSCA] Preenchendo {campo}={valor}")
+        _log(f"[BUSCA] Preenchendo {campo}={valor}")
         await self._page.goto(
             f"{URL_BASE}/Processo/ConsultaProcesso/listView.seam",
-            wait_until="networkidle"
+            wait_until="domcontentloaded"
         )
         await asyncio.sleep(2)
 
@@ -526,7 +598,7 @@ class PJeClient:
                     ]:
                         try:
                             await self._page.click(sel, timeout=2000)
-                            print(f"[BUSCA] Radio CNPJ marcado via {sel}")
+                            _log(f"[BUSCA] Radio CNPJ marcado via {sel}")
                             break
                         except Exception:
                             continue
@@ -541,19 +613,19 @@ class PJeClient:
                         el = await self._page.wait_for_selector(sel, timeout=3000)
                         await el.fill(valor)
                         preencheu = True
-                        print(f"[BUSCA] Preencheu {campo} em {sel}")
+                        _log(f"[BUSCA] Preencheu {campo} em {sel}")
                         break
                     except Exception:
                         continue
             except Exception as e:
-                print(f"[BUSCA] Erro CPF/CNPJ: {e}")
+                _log(f"[BUSCA] Erro CPF/CNPJ: {e}")
         elif campo in mapa_seletores:
             for sel in mapa_seletores[campo]:
                 try:
                     el = await self._page.wait_for_selector(sel, timeout=3000)
                     await el.fill(valor)
                     preencheu = True
-                    print(f"[BUSCA] Preencheu {campo} em {sel}")
+                    _log(f"[BUSCA] Preencheu {campo} em {sel}")
                     break
                 except Exception:
                     continue
@@ -582,7 +654,7 @@ class PJeClient:
                     except Exception:
                         continue
             except Exception as e:
-                print(f"[BUSCA] Erro OAB: {e}")
+                _log(f"[BUSCA] Erro OAB: {e}")
 
         if not preencheu:
             return {"erro": f"Nao consegui preencher campo {campo}", "campo": campo}
@@ -599,7 +671,7 @@ class PJeClient:
             except Exception:
                 continue
 
-        await self._page.wait_for_load_state("networkidle", timeout=20000)
+        await self._page.wait_for_load_state("domcontentloaded", timeout=20000)
         await asyncio.sleep(3)
 
         # Extrai resultados - filtra so linhas que tem numero CNJ (evita calendario)
@@ -681,9 +753,39 @@ class PJeClient:
     # ========== DOCUMENTOS ==========
 
     async def listar_documentos(self, numero_cnj):
-        """Lista todos os documentos do processo (id + tipo)."""
+        """Lista todos os documentos do processo (id + tipo).
+
+        IMPORTANTE: a arvore lateral do PJe usa lazy-loading. Forcamos scroll
+        ate o fim pra carregar TODOS os documentos antes de extrair.
+        """
         aba = await self._abrir_autos_processo(numero_cnj)
         await asyncio.sleep(2)
+
+        # Forca lazy-loading: scrolla a arvore lateral ate o fim algumas vezes
+        # ate que o numero de documentos pare de crescer
+        _log("[DOC] Forcando lazy-load da arvore...")
+        anterior = -1
+        for tentativa in range(20):
+            atual = await aba.evaluate(
+                "() => document.querySelectorAll('[onclick*=\"abrirLinkDocumento\"]').length"
+            )
+            if atual == anterior:
+                _log(f"[DOC] Estabilizou em {atual} docs apos {tentativa} scrolls")
+                break
+            anterior = atual
+            # Scroll na area da arvore (panel esquerdo)
+            await aba.evaluate("""
+                () => {
+                    const sels = ['#tabPanelDocs', '.scroll-y', '.documentos-panel',
+                                  '#documentos', 'aside', '.barra-de-tarefas'];
+                    for (const s of sels) {
+                        const el = document.querySelector(s);
+                        if (el) { el.scrollTop = el.scrollHeight; }
+                    }
+                    window.scrollTo(0, document.body.scrollHeight);
+                }
+            """)
+            await asyncio.sleep(0.6)
 
         js_code = """
         () => {
@@ -722,11 +824,11 @@ class PJeClient:
         try:
             docs = await aba.evaluate(js_code)
         except Exception as e:
-            print(f"[DOC] Erro no JS: {e}")
+            _log(f"[DOC] Erro no JS: {e}")
             docs = []
 
         if not docs:
-            print("[DOC] JS vazio, tentando fallback com regex no HTML")
+            _log(f"[DOC] JS vazio, tentando fallback com regex no HTML")
             html = await aba.content()
             vistos = set()
             for m in re.finditer(r"abrirLinkDocumento\(['\"](\d{6,9})['\"]\)", html):
@@ -751,7 +853,7 @@ class PJeClient:
         aba = await self._abrir_autos_processo(numero_cnj)
         await asyncio.sleep(2)
 
-        print(f"[DOC] Abrindo documento {id_documento}...")
+        _log(f"[DOC] Abrindo documento {id_documento}...")
         async with self._context.expect_page(timeout=30000) as nova_aba_info:
             await aba.evaluate(f"abrirLinkDocumento('{id_documento}')")
 
@@ -760,7 +862,7 @@ class PJeClient:
         await asyncio.sleep(3)
 
         url_doc = nova_aba.url
-        print(f"[DOC] URL: {url_doc}")
+        _log(f"[DOC] URL: {url_doc}")
 
         resultado = {
             "id_documento": id_documento,
@@ -809,3 +911,476 @@ class PJeClient:
             pass
 
         return resultado
+
+    # ========== DOWNLOAD NATIVO DOS AUTOS COMPLETOS ==========
+
+    async def baixar_processo_nativo(
+        self,
+        numero_cnj,
+        caminho_destino,
+        tipo_documento="",
+        id_inicial="",
+        id_final="",
+        periodo_inicio="",
+        periodo_fim="",
+        cronologia="decrescente",
+        incluir_expediente=False,
+        incluir_movimentos=False,
+        timeout_download_ms=120000,
+    ):
+        """
+        VERSAO NOVA com seletores reais capturados via DevTools/captura passiva.
+
+        Fluxo:
+        1. Abre autos do processo
+        2. Clica no <a class='btn-menu-abas dropdown-toggle' title='Download autos
+           do processo'> que abre o dropdown
+        3. (Opcional) altera selects dentro do dialog
+        4. Clica em <input value='Download'> que dispara A4J.AJAX.Submit
+        5. expect_download captura o ZIP gerado em S3 (~19s)
+        6. Extrai o PDF interno do ZIP e salva no caminho_destino
+        """
+        return await self._baixar_processo_nativo_v2(
+            numero_cnj=numero_cnj,
+            caminho_destino=caminho_destino,
+            tipo_documento=tipo_documento,
+            id_inicial=id_inicial,
+            id_final=id_final,
+            periodo_inicio=periodo_inicio,
+            periodo_fim=periodo_fim,
+            cronologia=cronologia,
+            incluir_expediente=incluir_expediente,
+            incluir_movimentos=incluir_movimentos,
+            timeout_download_ms=timeout_download_ms,
+        )
+
+    async def _baixar_processo_nativo_v2(
+        self,
+        numero_cnj,
+        caminho_destino,
+        tipo_documento="",
+        id_inicial="",
+        id_final="",
+        periodo_inicio="",
+        periodo_fim="",
+        cronologia="decrescente",
+        incluir_expediente=False,
+        incluir_movimentos=False,
+        timeout_download_ms=120000,
+    ):
+        """Implementacao real - separada pra manter compat antiga em scripts.
+
+        Observacao: o PJe-TJPI nao serve o PDF como attachment - ele abre uma
+        nova aba apontando pra uma URL pre-assinada do S3
+        (storagepje.tjpi.jus.br/.../processo.pdf?X-Amz-...&X-Amz-Expires=120).
+        Por isso 'expect_download' nao dispara. Capturamos a URL via listener
+        de request e baixamos via APIRequestContext dentro da janela de 120s.
+        """
+        from pathlib import Path
+
+        caminho_destino = Path(caminho_destino)
+        caminho_destino.parent.mkdir(parents=True, exist_ok=True)
+
+        aba = await self._abrir_autos_processo(numero_cnj)
+        await asyncio.sleep(2)
+
+        # 1. Clica no trigger do dropdown
+        _log("[NATIVO] Clicando no trigger do dropdown...")
+        try:
+            await aba.click(
+                "a.btn-menu-abas.dropdown-toggle[title='Download autos do processo']",
+                timeout=5000,
+            )
+        except Exception:
+            # Fallback
+            await aba.click("li.filtros-download a.dropdown-toggle", timeout=3000)
+
+        # 2. Espera o dropdown abrir (aria-expanded=true / class 'open')
+        await aba.wait_for_selector("li.filtros-download.open", timeout=5000)
+        _log("[NATIVO] Dropdown aberto")
+        await asyncio.sleep(0.5)  # JS renderizar campos
+
+        # 3. Cronologia (Select2 do PJe usa IDs especificos). Default do PJe = DESC.
+        #    Os campos sao Select2: precisa setar .value E disparar 'change' via jQuery.
+        if cronologia.lower().startswith("cres"):
+            valor_cronologia = "ASC"
+        else:
+            valor_cronologia = "DESC"
+
+        try:
+            ok = await aba.evaluate(f"""
+                () => {{
+                    const sel = document.getElementById('navbar:cbCronologia');
+                    if (!sel) return 'select-nao-encontrado';
+                    sel.value = '{valor_cronologia}';
+                    if (window.jQuery) {{
+                        window.jQuery(sel).trigger('change');
+                        return 'jquery-change';
+                    }}
+                    sel.dispatchEvent(new Event('change', {{bubbles: true}}));
+                    return 'native-change';
+                }}
+            """)
+            _log(f"[NATIVO] Cronologia={valor_cronologia} via {ok}")
+        except Exception as e:
+            _log(f"[NATIVO] Aviso ao setar cronologia: {e}")
+
+        # 4. Tipo de documento (best effort - precisa saber o valor exato)
+        if tipo_documento:
+            try:
+                await aba.evaluate(f"""
+                    () => {{
+                        const sel = document.getElementById('navbar:cbTipoDocumento');
+                        if (!sel) return false;
+                        for (const opt of sel.options) {{
+                            if (opt.text.toLowerCase().includes('{tipo_documento.lower()}')) {{
+                                sel.value = opt.value;
+                                if (window.jQuery) window.jQuery(sel).trigger('change');
+                                else sel.dispatchEvent(new Event('change', {{bubbles: true}}));
+                                return true;
+                            }}
+                        }}
+                        return false;
+                    }}
+                """)
+                _log(f"[NATIVO] Tipo documento={tipo_documento} setado")
+            except Exception as e:
+                _log(f"[NATIVO] Aviso tipo documento: {e}")
+
+        # 5. Incluir expediente / movimentos (Select2 com 'Sim'/'Não')
+        if incluir_expediente:
+            try:
+                await aba.evaluate("""
+                    () => {
+                        const sel = document.getElementById('navbar:cbExpediente');
+                        if (!sel) return false;
+                        for (const opt of sel.options) {
+                            if (opt.text.toLowerCase().trim() === 'sim') {
+                                sel.value = opt.value;
+                                if (window.jQuery) window.jQuery(sel).trigger('change');
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                """)
+            except Exception:
+                pass
+
+        if incluir_movimentos:
+            try:
+                await aba.evaluate("""
+                    () => {
+                        const sel = document.getElementById('navbar:cbMovimentos');
+                        if (!sel) return false;
+                        for (const opt of sel.options) {
+                            if (opt.text.toLowerCase().trim() === 'sim') {
+                                sel.value = opt.value;
+                                if (window.jQuery) window.jQuery(sel).trigger('change');
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                """)
+            except Exception:
+                pass
+
+        # 6. Range de IDs e periodo (inputs simples, nao Select2)
+        if id_inicial:
+            try:
+                await aba.fill("input[name*='idInicial'], input[id*='idInicial']", str(id_inicial), timeout=2000)
+            except Exception:
+                pass
+        if id_final:
+            try:
+                await aba.fill("input[name*='idFinal'], input[id*='idFinal']", str(id_final), timeout=2000)
+            except Exception:
+                pass
+        if periodo_inicio:
+            try:
+                await aba.fill("input[name*='periodoInicio']", periodo_inicio, timeout=2000)
+            except Exception:
+                pass
+        if periodo_fim:
+            try:
+                await aba.fill("input[name*='periodoFim']", periodo_fim, timeout=2000)
+            except Exception:
+                pass
+
+        # 7. Listener pra capturar a URL S3 assim que o PJe a gerar.
+        #    O PJe abre o PDF numa nova aba apontando pra storagepje.tjpi.jus.br
+        #    com URL pre-assinada (X-Amz-Expires=120s). Capturamos no on('request').
+        loop = asyncio.get_event_loop()
+        url_future = loop.create_future()
+        aba_pdf_future = loop.create_future()
+
+        def _on_request(request):
+            url = request.url
+            if (
+                not url_future.done()
+                and "storagepje.tjpi.jus.br" in url
+                and "processo.pdf" in url
+                and "X-Amz-Signature" in url
+            ):
+                url_future.set_result(url)
+
+        def _on_page(page):
+            if not aba_pdf_future.done():
+                aba_pdf_future.set_result(page)
+
+        self._context.on("request", _on_request)
+        self._context.on("page", _on_page)
+
+        try:
+            # 8. Clica DOWNLOAD - dispara AJAX, servidor gera PDF (~10-30s) e
+            #    abre nova aba apontando pra URL S3.
+            _log("[NATIVO] Clicando DOWNLOAD - servidor vai gerar PDF...")
+            for sel in [
+                "#navbar\\:botoesDownload input.btn-primary[value='Download']",
+                "li.filtros-download .dropdown-menu input.btn-primary[value='Download']",
+                "input.btn-primary[value='Download']",
+                "input[value='Download'][type='button']",
+            ]:
+                try:
+                    await aba.click(sel, timeout=3000)
+                    _log(f"[NATIVO] DOWNLOAD clicado via {sel}")
+                    break
+                except Exception:
+                    continue
+
+            # 9. Aguarda a URL S3 aparecer (timeout = janela de validade do PJe)
+            try:
+                pdf_url = await asyncio.wait_for(
+                    url_future, timeout=timeout_download_ms / 1000
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    "Timeout aguardando URL S3 do PJe. O servidor nao gerou o PDF "
+                    f"em {timeout_download_ms/1000:.0f}s ou os seletores do modal "
+                    "mudaram (verificar btn-primary[value='Download'])."
+                )
+
+            _log(f"[NATIVO] URL S3 capturada: {pdf_url[:120]}...")
+
+            # 10. Baixa via APIRequestContext (mesmos cookies/proxy da sessao).
+            #     A URL pre-assinada e' valida por ~120s, entao baixamos imediatamente.
+            response = await self._context.request.get(pdf_url, timeout=60000)
+            if response.status != 200:
+                raise RuntimeError(
+                    f"Download S3 falhou: HTTP {response.status} - {await response.text()}"
+                )
+            corpo = await response.body()
+            caminho_destino.write_bytes(corpo)
+            _log(
+                f"[NATIVO] PDF salvo: {caminho_destino.name} "
+                f"({len(corpo)/1024/1024:.2f} MB)"
+            )
+
+            # 11. Fecha aba do PDF (se abriu) pra nao acumular.
+            if aba_pdf_future.done():
+                try:
+                    await aba_pdf_future.result().close()
+                except Exception:
+                    pass
+        finally:
+            try:
+                self._context.remove_listener("request", _on_request)
+                self._context.remove_listener("page", _on_page)
+            except Exception:
+                pass
+
+        if len(self._context.pages) > 1:
+            try:
+                await aba.close()
+            except Exception:
+                pass
+
+        tamanho_pdf = caminho_destino.stat().st_size
+        return {
+            "caminho": str(caminho_destino),
+            "tamanho_bytes": tamanho_pdf,
+            "tamanho_mb": round(tamanho_pdf / 1024 / 1024, 2),
+            "metodo": "nativo",
+            "filtros_aplicados": {
+                "tipo_documento": tipo_documento or None,
+                "cronologia": cronologia,
+                "incluir_expediente": incluir_expediente,
+                "incluir_movimentos": incluir_movimentos,
+            },
+        }
+
+    async def _baixar_processo_nativo_v1_DEPRECATED(
+        self,
+        numero_cnj,
+        caminho_destino,
+        tipo_documento="",
+        id_inicial="",
+        id_final="",
+        periodo_inicio="",
+        periodo_fim="",
+        cronologia="decrescente",
+        incluir_expediente=False,
+        incluir_movimentos=False,
+        timeout_download_ms=180000,
+    ):
+        """Usa o botao de download nativo do PJe pra baixar os autos completos.
+
+        Eh muito mais rapido que baixar doc por doc e concatenar.
+        O dialog tem filtros: tipo de documento, range de IDs, periodo,
+        cronologia, incluir/excluir expediente e movimentos.
+
+        caminho_destino: Path onde salvar o arquivo final (.pdf)
+        cronologia: 'decrescente' (default) ou 'crescente'
+        """
+        from pathlib import Path
+        caminho_destino = Path(caminho_destino)
+        caminho_destino.parent.mkdir(parents=True, exist_ok=True)
+
+        aba = await self._abrir_autos_processo(numero_cnj)
+        await asyncio.sleep(2)
+
+        # Abre o dropdown de download (icone de seta-pra-baixo no header)
+        _log("[BAIXA-NATIVO] Abrindo dropdown de download...")
+        dropdown_seletores = [
+            "a.btn-menu-abas.dropdown-toggle[title*='Download']",
+            "a.dropdown-toggle[title*='Download autos']",
+            "li.dropdown.filtros-download a.dropdown-toggle",
+        ]
+        clicou_dropdown = False
+        for sel in dropdown_seletores:
+            try:
+                await aba.click(sel, timeout=3000)
+                clicou_dropdown = True
+                _log(f"[BAIXA-NATIVO] Dropdown aberto via {sel}")
+                break
+            except Exception:
+                continue
+        if not clicou_dropdown:
+            raise RuntimeError("Nao consegui abrir o dropdown de download")
+
+        await asyncio.sleep(1)
+
+        # Preenche os filtros do dialog
+        if tipo_documento:
+            try:
+                await aba.select_option(
+                    "select[name*='tipoDocumento'], select[id*='tipoDocumento']",
+                    label=tipo_documento,
+                    timeout=3000,
+                )
+                _log(f"[BAIXA-NATIVO] tipo={tipo_documento}")
+            except Exception as e:
+                _log(f"[BAIXA-NATIVO] Aviso ao filtrar tipo: {e}")
+
+        if id_inicial:
+            try:
+                await aba.fill(
+                    "input[id*='idInicial'], input[name*='idInicial']",
+                    str(id_inicial),
+                )
+            except Exception:
+                pass
+        if id_final:
+            try:
+                await aba.fill(
+                    "input[id*='idFinal'], input[name*='idFinal']",
+                    str(id_final),
+                )
+            except Exception:
+                pass
+        if periodo_inicio:
+            try:
+                await aba.fill(
+                    "input[id*='periodoInicio'], input[name*='periodoInicio']",
+                    periodo_inicio,
+                )
+            except Exception:
+                pass
+        if periodo_fim:
+            try:
+                await aba.fill(
+                    "input[id*='periodoFim'], input[name*='periodoFim']",
+                    periodo_fim,
+                )
+            except Exception:
+                pass
+
+        # Cronologia: Decrescente (default) ou Crescente
+        try:
+            label_cronologia = (
+                "Decrescente" if cronologia.lower().startswith("decres") else "Crescente"
+            )
+            await aba.select_option(
+                "select[id*='cronologia'], select[name*='cronologia']",
+                label=label_cronologia,
+                timeout=3000,
+            )
+            _log(f"[BAIXA-NATIVO] cronologia={label_cronologia}")
+        except Exception as e:
+            _log(f"[BAIXA-NATIVO] Aviso cronologia: {e}")
+
+        # Incluir expediente / movimentos
+        try:
+            await aba.select_option(
+                "select[id*='incluirExpediente'], select[name*='incluirExpediente']",
+                label="Sim" if incluir_expediente else "Não",
+                timeout=2000,
+            )
+        except Exception:
+            pass
+        try:
+            await aba.select_option(
+                "select[id*='incluirMovimentos'], select[name*='incluirMovimentos']",
+                label="Sim" if incluir_movimentos else "Não",
+                timeout=2000,
+            )
+        except Exception:
+            pass
+
+        # Clica em DOWNLOAD e captura o arquivo
+        _log("[BAIXA-NATIVO] Clicando DOWNLOAD - aguardando resposta...")
+        async with aba.expect_download(timeout=timeout_download_ms) as download_info:
+            for sel in [
+                "button:has-text('DOWNLOAD')",
+                "button:has-text('Download')",
+                "input[value='DOWNLOAD']",
+                "input[value='Download']",
+                "a:has-text('DOWNLOAD')",
+            ]:
+                try:
+                    await aba.click(sel, timeout=2000)
+                    break
+                except Exception:
+                    continue
+
+        download = await download_info.value
+        _log(f"[BAIXA-NATIVO] Download recebido, salvando...")
+        await download.save_as(str(caminho_destino))
+        tamanho = caminho_destino.stat().st_size
+        _log(
+            f"[BAIXA-NATIVO] Salvo {caminho_destino.name} "
+            f"({tamanho/1024/1024:.2f} MB)"
+        )
+
+        if len(self._context.pages) > 1:
+            try:
+                await aba.close()
+            except Exception:
+                pass
+
+        return {
+            "caminho": str(caminho_destino),
+            "tamanho_bytes": tamanho,
+            "tamanho_mb": round(tamanho / 1024 / 1024, 2),
+            "filtros_aplicados": {
+                "tipo_documento": tipo_documento or None,
+                "id_inicial": id_inicial or None,
+                "id_final": id_final or None,
+                "periodo_inicio": periodo_inicio or None,
+                "periodo_fim": periodo_fim or None,
+                "cronologia": cronologia,
+                "incluir_expediente": incluir_expediente,
+                "incluir_movimentos": incluir_movimentos,
+            },
+        }
