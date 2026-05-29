@@ -127,9 +127,30 @@ class PJeClient:
     async def _login(self):
         """Faz login no SSO do CNJ com CPF + senha + TOTP.
 
-        Se ja existe sessao valida nos cookies (profile persistente), pula o
-        formulario de login - basta navegar pra login.seam e o PJe redireciona
-        direto pro painel.
+        Wrapper com 1 retry pra tolerar flakes esporadicas (p.ex. servidor
+        redirecionando antes do 2FA aparecer, TOTP no fim do ciclo, etc.).
+        """
+        for tentativa in range(2):
+            try:
+                return await self._login_uma_vez()
+            except Exception as e:
+                if tentativa == 0:
+                    _log(
+                        f"[LOGIN] Falha na 1a tentativa ({e.__class__.__name__}: "
+                        f"{str(e)[:120]}), retry em 5s..."
+                    )
+                    await asyncio.sleep(5)
+                else:
+                    raise
+
+    async def _login_uma_vez(self):
+        """Implementacao do login (1 tentativa).
+
+        Se ja existe sessao valida nos cookies, pula o formulario de login -
+        basta navegar pra login.seam e o PJe redireciona direto pro painel.
+        Tambem detecta quando o servidor PULA o 2FA apos CPF+senha (cookie
+        de "trust this device" ou sessao parcial) - nesse caso retorna sem
+        tentar preencher o codigo TOTP.
         """
         _log(f"[LOGIN] Iniciando...")
         await self._page.goto(f"{URL_BASE}/login.seam", wait_until="domcontentloaded")
@@ -156,6 +177,13 @@ class PJeClient:
         except Exception:
             await self._page.click("button[type='submit']")
         await self._page.wait_for_load_state("domcontentloaded", timeout=15000)
+
+        # Se o servidor pulou o 2FA (cookie de trust ou sessao parcial),
+        # ja estamos logados - vai direto pra home.seam ou similar.
+        url_pos_senha = self._page.url
+        if any(p in url_pos_senha for p in ["home.seam", "painel", "ssoCallback", "Painel"]):
+            _log(f"[LOGIN] Servidor pulou 2FA, ja logado. URL: {url_pos_senha}")
+            return
 
         # 2FA
         codigo = self._codigo_totp()

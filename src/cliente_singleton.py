@@ -63,11 +63,27 @@ async def get_cliente(persona: str = "advogado") -> PJeClient:
         agora = time.time()
         idade = agora - _ultimo_uso if _ultimo_uso else float("inf")
 
-        # Reusa se: existe + mesma persona + dentro do timeout
+        # Reusa se: existe + mesma persona + dentro do timeout + browser vivo.
+        # Health-check do browser e' importante porque o usuario pode ter
+        # fechado a janela manualmente (X), ou o processo Chrome pode ter
+        # morrido. Sem o check, o singleton entrega referencia morta e a
+        # proxima tool call falha com "Target page, context or browser has
+        # been closed".
+        browser_vivo = False
+        if _cliente is not None:
+            try:
+                browser_vivo = (
+                    _cliente._browser is not None
+                    and _cliente._browser.is_connected()
+                )
+            except Exception:
+                browser_vivo = False
+
         if (
             _cliente is not None
             and _persona_ativa == persona
             and idade < TIMEOUT_INATIVIDADE_S
+            and browser_vivo
         ):
             _log(f"[SINGLETON] Reusando sessao ({idade:.0f}s desde ultimo uso)")
             _ultimo_uso = agora
@@ -75,11 +91,12 @@ async def get_cliente(persona: str = "advogado") -> PJeClient:
 
         # Caso contrario: fecha o atual (se houver) e cria novo
         if _cliente is not None:
-            motivo = (
-                "troca de persona"
-                if _persona_ativa != persona
-                else f"timeout ({idade:.0f}s > {TIMEOUT_INATIVIDADE_S}s)"
-            )
+            if not browser_vivo:
+                motivo = "browser fechado/desconectado"
+            elif _persona_ativa != persona:
+                motivo = "troca de persona"
+            else:
+                motivo = f"timeout ({idade:.0f}s > {TIMEOUT_INATIVIDADE_S}s)"
             _log(f"[SINGLETON] Fechando sessao anterior ({motivo})")
             try:
                 await _cliente._fechar()
@@ -89,11 +106,15 @@ async def get_cliente(persona: str = "advogado") -> PJeClient:
             _persona_ativa = None
 
         # Cria novo cliente + login.
-        # HEADLESS=False obrigatorio (PJe bloqueia headless). Singleton mantem
-        # a janela aberta por ate 5min, entao nao fica piscando entre chamadas.
-        # Pode setar env PJE_HEADLESS=1 pra forçar headless (debug local).
+        # HEADLESS=True por default (descoberto em 2026-05-05): com Playwright
+        # puro + Chromium padrao, o headless funciona no PJe-TJPI. A "armadilha"
+        # original do bloqueio de headless nao se reproduziu mais. Pode ter sido
+        # flake do servidor ou efeito colateral do bug do networkidle/doc_a_doc
+        # que ja foram corrigidos.
+        # _login() tem retry automatico (1x) pra cobrir flakes pontuais.
+        # Pra forcar HEADED de novo (debug visual): PJE_HEADLESS=0 ...
         import os
-        headless_env = os.environ.get("PJE_HEADLESS", "0") == "1"
+        headless_env = os.environ.get("PJE_HEADLESS", "1") == "1"
 
         _log(f"[SINGLETON] Criando nova sessao (persona={persona}, headless={headless_env})")
         cpf, senha, seed = _get_creds()

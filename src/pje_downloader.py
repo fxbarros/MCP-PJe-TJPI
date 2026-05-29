@@ -211,16 +211,22 @@ async def baixar_processo_completo(
     incluir_expediente: bool = True,
     incluir_movimentos: bool = True,
     forcar: bool = False,
-    metodo: str = "doc_a_doc",
+    metodo: str = "nativo",
     limite: int = 0,
 ) -> dict:
     """Baixa o processo completo.
 
-    metodo='doc_a_doc' (default): itera documentos da arvore (confiavel)
-    metodo='nativo': usa download nativo do PJe (mais rapido, em desenvolvimento)
+    metodo='nativo' (default, recomendado): consolida no servidor PJe,
+        baixa em UMA requisicao do S3 pre-assinado. Inclui capa/indice e
+        expediente/movimentos. Sempre completo.
+    metodo='doc_a_doc' (alternativo): itera documentos da arvore e
+        concatena. Util quando voce quer os arquivos individuais separados
+        em Processos TJPI 1 Grau/{cnj}/documentos/. Limitacao: depende do
+        listar_documentos, que tem bug de paginacao em processos com >30 docs.
 
     Salva docs individuais em Processos TJPI 1 Grau/{cnj}/documentos/
-    Salva PDF consolidado em Processos TJPI 1 Grau/{cnj}/{cnj}.pdf
+        (apenas no modo doc_a_doc).
+    Salva PDF consolidado em Processos TJPI 1 Grau/{cnj}/{cnj}.pdf.
     """
     pasta = pasta_processo(numero_cnj)
     consolidado_path = pasta / f"{cnj_safe(numero_cnj)}.pdf"

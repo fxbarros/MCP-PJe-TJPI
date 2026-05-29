@@ -345,7 +345,7 @@ async def baixar_documento(
 @mcp.tool()
 async def baixar_processo(
     numero_cnj: str,
-    metodo: str = "doc_a_doc",
+    metodo: str = "nativo",
     limite: int = 0,
     cronologia: str = "decrescente",
     forcar: bool = False,
@@ -354,11 +354,16 @@ async def baixar_processo(
     """
     [TJPI - 1o GRAU] Baixa os autos COMPLETOS do processo.
 
-    Salva docs individuais em: Processos TJPI 1 Grau/{cnj}/documentos/
     Salva PDF consolidado em: Processos TJPI 1 Grau/{cnj}/{cnj}.pdf
+    No modo doc_a_doc tambem salva individuais em .../documentos/
 
-    - metodo: 'doc_a_doc' (default, confiavel) | 'nativo' (em desenvolvimento)
+    - metodo: 'nativo' (default, completo - servidor PJe consolida com
+              capa/indice + expediente + movimentos)
+            | 'doc_a_doc' (alternativo - itera arvore de docs e concatena;
+              util pra ter arquivos individuais separados, mas limitado a
+              ~30 docs por bug de paginacao do listar_documentos)
     - limite: 0=todos | N=baixa so os primeiros N documentos (por cronologia)
+              [aplicavel apenas em metodo='doc_a_doc']
     - cronologia: 'decrescente' (default, mais recente primeiro) | 'crescente'
     - forcar: True pra re-baixar mesmo se ja existir cache
     """

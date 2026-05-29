@@ -33,6 +33,7 @@ test-results/
 .idea/
 *.swp
 *.swo
+*.bak
 
 # Sistema operacional
 .DS_Store
