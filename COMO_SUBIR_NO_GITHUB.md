@@ -116,8 +116,9 @@ Rode esta verificação pra confirmar:
 
 ```bash
 # Deve retornar vazio ou só matches triviais (ex: no README)
-grep -r "XXX\." --include="*.py" .
-grep -r "123456" --include="*.py" .
+# Troque os termos abaixo pelos SEUS dados reais ao rodar (CPF, OAB):
+grep -r "SEU_INICIO_DE_CPF" --include="*.py" .
+grep -r "SEU_NUMERO_OAB" --include="*.py" .
 ```
 
 ## 🆘 Se algo der errado
