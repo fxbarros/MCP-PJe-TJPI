@@ -48,19 +48,14 @@ def url_documento(processo_id: str, documento_id: str) -> str:
 async def baixar_documento_bytes(client, numero_cnj: str, documento_id: str) -> dict:
     """Baixa 1 documento como bytes usando a sessao autenticada do PJeClient.
 
-    Garante que os autos foram abertos antes (pra capturar processo_id).
+    Garante que o processo_id em cache pertence a ESTE processo (com o
+    singleton, o id pode ter sobrado de outro processo consultado antes -
+    usar o id errado baixaria documento de outro processo ou daria 404).
     Retorna dict com bytes, content_type, tamanho, formato.
     """
-    if not client._ultimo_processo_id:
-        _log(f"[BAIXA] Abrindo autos pra capturar processo_id...")
-        await client._abrir_autos_processo(numero_cnj)
+    processo_id = await client.garantir_processo_id(numero_cnj)
 
-    if not client._ultimo_processo_id:
-        raise RuntimeError(
-            f"Nao consegui extrair processo_id da URL dos autos de {numero_cnj}"
-        )
-
-    url = url_documento(client._ultimo_processo_id, str(documento_id))
+    url = url_documento(processo_id, str(documento_id))
     _log(f"[BAIXA] GET {url}")
 
     resp = await client._context.request.get(url)
@@ -153,7 +148,11 @@ async def baixar_processo_doc_a_doc(
             erros.append({"id": d["id"], "tipo": d["tipo"], "erro": str(e)})
             _log(f"[BAIXA-DOC] {i+1}/{len(docs)} FAIL: {d['id']} - {e}")
 
-    # Consolida PDFs em um unico arquivo
+    # Consolida PDFs em um unico arquivo.
+    # IMPORTANTE: NUNCA escrever no caminho de cache {cnj}.pdf - esse nome e'
+    # reservado pro download nativo (sempre completo). O doc_a_doc pode ser
+    # parcial (limite=N ou teto do lazy-load), e um {cnj}.pdf parcial seria
+    # servido como "autos completos" em cache-hits futuros do preparar_processo.
     pdfs = [s for s in salvos if s.get("formato") == "pdf"]
     consolidado = None
     if len(pdfs) >= 1:
@@ -162,7 +161,8 @@ async def baixar_processo_doc_a_doc(
             writer = PdfWriter()
             for p in pdfs:
                 writer.append(p["caminho"])
-            destino = pasta_processo(numero_cnj) / f"{cnj_safe(numero_cnj)}.pdf"
+            sufixo = f" (parcial {len(pdfs)} docs)" if limite else " (doc_a_doc)"
+            destino = pasta_processo(numero_cnj) / f"{cnj_safe(numero_cnj)}{sufixo}.pdf"
             with open(destino, "wb") as f:
                 writer.write(f)
             tamanho = destino.stat().st_size
@@ -226,13 +226,24 @@ async def baixar_processo_completo(
 
     Salva docs individuais em Processos TJPI 1 Grau/{cnj}/documentos/
         (apenas no modo doc_a_doc).
-    Salva PDF consolidado em Processos TJPI 1 Grau/{cnj}/{cnj}.pdf.
+    Salva PDF consolidado em Processos TJPI 1 Grau/{cnj}/{cnj}.pdf
+        (apenas no modo nativo - doc_a_doc usa sufixo proprio).
     """
+    if metodo not in ("nativo", "doc_a_doc"):
+        # Sem validacao, qualquer typo caia silenciosamente no doc_a_doc
+        raise ValueError(
+            f"Metodo invalido: {metodo!r}. Use 'nativo' ou 'doc_a_doc'."
+        )
+
     pasta = pasta_processo(numero_cnj)
     consolidado_path = pasta / f"{cnj_safe(numero_cnj)}.pdf"
 
-    # Cache hit
-    if consolidado_path.exists() and not forcar:
+    # Cache hit - SO vale pro metodo nativo SEM filtros: o {cnj}.pdf em cache
+    # e' sempre os autos completos. Pro doc_a_doc (que gera individuais) ou
+    # pra pedidos com filtro/recorte, o cache nao representa o que foi pedido.
+    sem_filtros = not any([tipo_documento, id_inicial, id_final,
+                           periodo_inicio, periodo_fim, limite])
+    if metodo == "nativo" and sem_filtros and consolidado_path.exists() and not forcar:
         tamanho = consolidado_path.stat().st_size
         _log(f"[BAIXA] Cache hit: {consolidado_path.name} ({tamanho/1024/1024:.2f} MB)")
         return {
@@ -245,9 +256,13 @@ async def baixar_processo_completo(
         }
 
     if metodo == "nativo":
+        # Download com filtro/recorte NAO pode ocupar o caminho de cache
+        destino = consolidado_path if sem_filtros else (
+            pasta / f"{cnj_safe(numero_cnj)} (recorte).pdf"
+        )
         r = await client.baixar_processo_nativo(
             numero_cnj=numero_cnj,
-            caminho_destino=consolidado_path,
+            caminho_destino=destino,
             tipo_documento=tipo_documento,
             id_inicial=id_inicial,
             id_final=id_final,
@@ -286,7 +301,13 @@ async def preparar_processo_orquestrador(
         client, numero_cnj, cronologia="decrescente", forcar=forcar
     )
 
-    tamanho_mb = info["tamanho_mb"]
+    tamanho_mb = info.get("tamanho_mb")
+    if tamanho_mb is None:
+        caminho = info.get("caminho")
+        tamanho_mb = (
+            round(Path(caminho).stat().st_size / 1024 / 1024, 2) if caminho else 0
+        )
+        info["tamanho_mb"] = tamanho_mb
 
     if tamanho_mb <= LIMITE_PDF_DIRETO_MB:
         estrategia = "pdf_direto"

@@ -62,11 +62,18 @@ def listar_modelos() -> dict:
             "tamanho_bytes": arquivo.stat().st_size,
         })
 
-    return {
+    resultado = {
         "pasta": str(PASTA_MODELOS),
         "total": len(modelos),
         "modelos": modelos,
     }
+    if not modelos:
+        resultado["aviso"] = (
+            "A pasta de modelos existe mas esta VAZIA. Coloque modelos "
+            f".docx/.md/.txt em {PASTA_MODELOS} (ex: 'Modelo peticao "
+            "contestacao.docx', 'Modelo relatorio analise.docx')."
+        )
+    return resultado
 
 
 def ler_modelo(arquivo: str) -> dict:

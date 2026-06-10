@@ -4,10 +4,13 @@ Mantem 1 unica sessao do PJe ativa entre tool calls do MCP server,
 evitando logins repetidos (que disparam rate-limiting do TJ-PI).
 
 Comportamento:
-- 1a chamada: cria cliente + login (~30s)
+- Startup do server: warmup() faz login antecipado em background (evita
+  -32001 na 1a tool call a frio)
 - Chamadas seguintes em <5min, mesma persona: reusa (~5-10s, sem login)
 - Troca de persona OU >5min sem uso: fecha o anterior e cria novo
-- atexit: cleanup ao desligar o MCP server
+- Watchdog do server chama fechar_se_ocioso() periodicamente: fecha o
+  Chromium DE FATO apos o timeout (nao so na proxima chamada)
+- Shutdown (lifespan do server) + atexit (backstop): cleanup
 
 Trade-offs aceitos:
 - Cookie do PJe vivo em RAM por ate 5min (nao em disco - usa context normal,
@@ -17,6 +20,7 @@ Trade-offs aceitos:
 """
 import asyncio
 import atexit
+import os
 import sys
 import time
 from typing import Optional
@@ -113,7 +117,6 @@ async def get_cliente(persona: str = "advogado") -> PJeClient:
         # que ja foram corrigidos.
         # _login() tem retry automatico (1x) pra cobrir flakes pontuais.
         # Pra forcar HEADED de novo (debug visual): PJE_HEADLESS=0 ...
-        import os
         headless_env = os.environ.get("PJE_HEADLESS", "1") == "1"
 
         _log(f"[SINGLETON] Criando nova sessao (persona={persona}, headless={headless_env})")
@@ -129,8 +132,54 @@ async def get_cliente(persona: str = "advogado") -> PJeClient:
         return _cliente
 
 
+async def warmup(persona: str = "advogado") -> None:
+    """Faz o login ANTECIPADO, em background, no startup do servidor MCP.
+
+    Motivo: a 1a tool call a frio (login ~25s + acao ~15s) estoura o timeout
+    do protocolo MCP (-32001). Com warm-up, quando a 1a chamada chegar a
+    sessao ja esta quente. Se a chamada chegar DURANTE o warm-up, ela espera
+    no _lock do get_cliente e reusa o login em andamento (nao duplica).
+    Falha de warm-up nao e' fatal: o login acontece na 1a chamada como antes.
+    """
+    try:
+        _log("[SINGLETON] Warm-up: login antecipado em background...")
+        await get_cliente(persona)
+        _log("[SINGLETON] Warm-up concluido - sessao pronta")
+    except Exception as e:
+        _log(f"[SINGLETON] Warm-up falhou ({e.__class__.__name__}: {e}); "
+             "login ocorrera na 1a tool call")
+
+
+async def fechar_se_ocioso() -> bool:
+    """Fecha a sessao se passou do timeout de inatividade. Retorna True se fechou.
+
+    Chamado periodicamente pelo watchdog do server. Sem isso, o Chromium
+    ficava vivo indefinidamente entre chamadas (o timeout so era checado
+    lazy, na chamada seguinte).
+    """
+    global _cliente, _persona_ativa
+    async with _lock:
+        if _cliente is None:
+            return False
+        idade = time.time() - _ultimo_uso
+        if idade < TIMEOUT_INATIVIDADE_S:
+            return False
+        # Espera operacao em andamento terminar antes de fechar (op_lock).
+        # Ordem de aquisicao (_lock -> _op_lock) e' a mesma do fluxo das
+        # tools (get_cliente -> metodo), entao nao ha deadlock.
+        async with _cliente._op_lock:
+            _log(f"[SINGLETON] Watchdog: fechando sessao ociosa ({idade:.0f}s)")
+            try:
+                await _cliente._fechar()
+            except Exception as e:
+                _log(f"[SINGLETON] Erro ao fechar (ignorado): {e}")
+        _cliente = None
+        _persona_ativa = None
+        return True
+
+
 async def fechar_cliente():
-    """Fecha a sessao atual (chamado no atexit)."""
+    """Fecha a sessao atual (chamado no shutdown do server/atexit)."""
     global _cliente, _persona_ativa, _ultimo_uso
     if _cliente is not None:
         _log("[SINGLETON] Cleanup atexit - fechando sessao")

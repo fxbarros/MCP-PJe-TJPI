@@ -26,8 +26,11 @@ Tools disponiveis (22):
 Todas suportam parametro 'persona': 'advogado' (default) ou 'procurador'.
 Sessao do Chrome eh reusada por ate 5min entre tool calls (singleton).
 """
+import asyncio
+import os
 import re
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -40,7 +43,46 @@ import minutas
 import modelos
 import pje_downloader
 
-mcp = FastMCP("pje-tjpi-1g")
+
+async def _watchdog_inatividade():
+    """Fecha a sessao do PJe (Chromium) DE FATO apos o timeout de inatividade.
+
+    Sem isso o browser ficava vivo indefinidamente entre chamadas - o
+    timeout do singleton so era avaliado lazy, na tool call seguinte.
+    """
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await cliente_singleton.fechar_se_ocioso()
+        except Exception as e:
+            print(f"[WATCHDOG] erro ignorado: {e}", file=sys.stderr, flush=True)
+
+
+@asynccontextmanager
+async def _lifespan(_server):
+    """Startup: warm-up do login em background (mata o -32001 da 1a chamada
+    a frio) + watchdog de inatividade. Shutdown: fecha a sessao no MESMO
+    event loop (o atexit do cliente_singleton vira apenas backstop).
+
+    Warm-up pode ser desligado com PJE_WARMUP=0 (ex.: pra nao logar no PJe
+    toda vez que o Claude Desktop inicia, se voce raramente usa este MCP).
+    """
+    tarefas = []
+    if os.environ.get("PJE_WARMUP", "1") == "1":
+        tarefas.append(asyncio.create_task(cliente_singleton.warmup()))
+    tarefas.append(asyncio.create_task(_watchdog_inatividade()))
+    try:
+        yield {}
+    finally:
+        for t in tarefas:
+            t.cancel()
+        try:
+            await cliente_singleton.fechar_cliente()
+        except Exception:
+            pass
+
+
+mcp = FastMCP("pje-tjpi-1g", lifespan=_lifespan)
 
 TRIBUNAL = "TJPI"
 GRAU = "1º grau"
@@ -91,7 +133,9 @@ async def verificar_prazos_urgentes(persona: str = "advogado") -> dict:
             dl = datetime.strptime(exp["data_limite"], "%d/%m/%Y %H:%M")
             dias = (dl - hoje).days
             if dl <= limite:
-                urgentes.append({**exp, "dias_restantes": dias})
+                # vencido=True deixa explicito que o prazo JA passou
+                # (dias_restantes negativo era facil de passar batido)
+                urgentes.append({**exp, "dias_restantes": dias, "vencido": dl < hoje})
         except (ValueError, KeyError):
             continue
     urgentes.sort(key=lambda x: x.get("dias_restantes", 999))
@@ -200,12 +244,21 @@ async def listar_documentos(numero_cnj: str, persona: str = "advogado") -> dict:
 
 @mcp.tool()
 async def ler_documento(
-    numero_cnj: str, id_documento: str, persona: str = "advogado"
+    numero_cnj: str,
+    id_documento: str,
+    max_paginas: int = 30,
+    persona: str = "advogado",
 ) -> dict:
-    """[TJPI - 1o GRAU] Le o teor completo de um documento (HTML ou PDF)."""
+    """[TJPI - 1o GRAU] Le o teor completo de um documento (HTML ou PDF).
+
+    PDFs com mais de max_paginas paginas voltam truncados, com truncado=True
+    e aviso explicito no retorno.
+    """
     p = _normaliza_persona(persona)
     pje = await cliente_singleton.get_cliente(p)
-    return _marcar_grau(await pje.ler_documento(numero_cnj, str(id_documento)), p)
+    return _marcar_grau(
+        await pje.ler_documento(numero_cnj, str(id_documento), max_paginas), p
+    )
 
 
 # =========================================================================
@@ -217,40 +270,22 @@ async def ultima_decisao(numero_cnj: str, persona: str = "advogado") -> dict:
     """
     [TJPI - 1o GRAU] Le o teor da ultima decisao/sentenca/despacho/ato ordinatorio.
 
-    Lista os documentos, filtra os decisorios, escolhe o de maior ID
+    Abre os autos UMA vez, filtra os decisorios, escolhe o de maior ID
     (mais recente) e devolve o teor completo. NAO baixa o processo todo.
     """
     p = _normaliza_persona(persona)
     pje = await cliente_singleton.get_cliente(p)
-    docs = await pje.listar_documentos(numero_cnj)
-
-    regex = re.compile(
+    r = await pje.ler_documento_filtrado(
+        numero_cnj,
         r"(decis[ãa]o|senten[çc]a|despacho|ato\s+ordinat[óo]rio)",
-        re.IGNORECASE,
     )
-    decisorios = [
-        d for d in docs.get("documentos", [])
-        if regex.search(d.get("tipo", ""))
-    ]
-
-    if not decisorios:
-        return _marcar_grau({
-            "numero_cnj": numero_cnj,
-            "encontrado": False,
-            "aviso": "Nenhuma decisao/sentenca/despacho encontrado nos documentos listados.",
-            "total_documentos": docs.get("total", 0),
-        }, p)
-
-    # Maior ID = mais recente
-    mais_recente = max(decisorios, key=lambda d: int(d["id"]))
-    teor = await pje.ler_documento(numero_cnj, mais_recente["id"])
-
-    return _marcar_grau({
-        "encontrado": True,
-        "tipo_documento": mais_recente["tipo"],
-        "documento_id": mais_recente["id"],
-        **teor,
-    }, p)
+    if not r.get("encontrado"):
+        r.setdefault(
+            "aviso",
+            "Nenhuma decisao/sentenca/despacho encontrado nos documentos listados.",
+        )
+        r["numero_cnj"] = numero_cnj
+    return _marcar_grau(r, p)
 
 
 @mcp.tool()
@@ -258,29 +293,11 @@ async def ultimo_despacho(numero_cnj: str, persona: str = "advogado") -> dict:
     """[TJPI - 1o GRAU] Le o teor do ultimo despacho (so despacho, nao decisao)."""
     p = _normaliza_persona(persona)
     pje = await cliente_singleton.get_cliente(p)
-    docs = await pje.listar_documentos(numero_cnj)
-
-    despachos = [
-        d for d in docs.get("documentos", [])
-        if "despacho" in d.get("tipo", "").lower()
-    ]
-
-    if not despachos:
-        return _marcar_grau({
-            "numero_cnj": numero_cnj,
-            "encontrado": False,
-            "aviso": "Nenhum despacho encontrado.",
-        }, p)
-
-    mais_recente = max(despachos, key=lambda d: int(d["id"]))
-    teor = await pje.ler_documento(numero_cnj, mais_recente["id"])
-
-    return _marcar_grau({
-        "encontrado": True,
-        "tipo_documento": mais_recente["tipo"],
-        "documento_id": mais_recente["id"],
-        **teor,
-    }, p)
+    r = await pje.ler_documento_filtrado(numero_cnj, r"despacho")
+    if not r.get("encontrado"):
+        r.setdefault("aviso", "Nenhum despacho encontrado.")
+        r["numero_cnj"] = numero_cnj
+    return _marcar_grau(r, p)
 
 
 @mcp.tool()
@@ -334,8 +351,8 @@ async def baixar_documento(
     """
     p = _normaliza_persona(persona)
     pje = await cliente_singleton.get_cliente(p)
-    # Garante que os autos foram abertos pra capturar processo_id
-    await pje._abrir_autos_processo(numero_cnj)
+    # garantir_processo_id (chamado dentro do downloader) abre os autos so
+    # se necessario e FECHA a aba - antes a aba ficava vazando no singleton
     r = await pje_downloader.salvar_documento(
         pje, numero_cnj, str(id_documento), tipo_descritivo
     )
@@ -355,13 +372,14 @@ async def baixar_processo(
     [TJPI - 1o GRAU] Baixa os autos COMPLETOS do processo.
 
     Salva PDF consolidado em: Processos TJPI 1 Grau/{cnj}/{cnj}.pdf
-    No modo doc_a_doc tambem salva individuais em .../documentos/
+    (so no metodo nativo; doc_a_doc consolida com sufixo proprio e tambem
+    salva individuais em .../documentos/)
 
     - metodo: 'nativo' (default, completo - servidor PJe consolida com
               capa/indice + expediente + movimentos)
             | 'doc_a_doc' (alternativo - itera arvore de docs e concatena;
-              util pra ter arquivos individuais separados, mas limitado a
-              ~30 docs por bug de paginacao do listar_documentos)
+              util pra ter arquivos individuais separados; pode nao pegar
+              todos os docs em processos muito grandes - lazy-load da arvore)
     - limite: 0=todos | N=baixa so os primeiros N documentos (por cronologia)
               [aplicavel apenas em metodo='doc_a_doc']
     - cronologia: 'decrescente' (default, mais recente primeiro) | 'crescente'

@@ -2,11 +2,13 @@
 
 Pasta: ~/Library/Mobile Documents/.../Processos TJPI 1 Grau/{cnj}/
 Arquivos: '{tipo} {cnj}.docx' (ex: 'Peticao 0000000-00.0000.0.00.0000.docx')
+Se ja existir arquivo com o mesmo nome, versiona: '{tipo} {cnj} (2).docx' etc.
 """
+import re
 import sys
 from pathlib import Path
 
-from pje_downloader import pasta_processo
+from pje_downloader import cnj_safe, pasta_processo
 
 
 def _log(msg: str) -> None:
@@ -41,8 +43,17 @@ def salvar_peca(
         raise ValueError(f"Formato invalido: {formato}. Use docx/md/txt.")
 
     pasta = pasta_processo(numero_cnj)
-    nome_arquivo = f"{tipo} {numero_cnj}.{formato}"
-    caminho = pasta / nome_arquivo
+    # Sanitiza tipo e cnj pro nome do arquivo (mesma regra da pasta) -
+    # evita separadores de caminho e afins vindos dos parametros
+    tipo_seguro = re.sub(r"[^\w À-ÿ.-]", "_", tipo).strip() or "Documento"
+    base = f"{tipo_seguro} {cnj_safe(numero_cnj)}"
+    caminho = pasta / f"{base}.{formato}"
+
+    # Nao sobrescreve versao anterior: acrescenta (2), (3), ...
+    versao = 2
+    while caminho.exists():
+        caminho = pasta / f"{base} ({versao}).{formato}"
+        versao += 1
 
     if formato == "docx":
         _salvar_docx(caminho, conteudo)
