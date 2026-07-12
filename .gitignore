@@ -41,3 +41,6 @@ fixtures/
 # Sistema operacional
 .DS_Store
 Thumbs.db
+
+# Guia de setup inicial - manter local, fora do GitHub
+COMO_SUBIR_NO_GITHUB.md
