@@ -28,6 +28,9 @@ test-results/
 *.pdf
 /tmp/processo_*
 
+# Fixtures de teste: HTML real de autos com NOMES DE PARTES - nunca commitar
+fixtures/
+
 # IDE
 .vscode/
 .idea/

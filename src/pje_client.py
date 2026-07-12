@@ -20,6 +20,7 @@ import time
 import pdfplumber
 import pyotp
 from playwright.async_api import async_playwright
+from scrapling.parser import Selector
 
 URL_BASE = "https://pje.tjpi.jus.br/1g"
 
@@ -229,7 +230,19 @@ class PJeClient:
             _log(f"[LOGIN] Servidor pulou 2FA, ja logado. URL: {url_pos_senha}")
             return
 
-        # 2FA
+        # Se o SSO re-renderizou o PROPRIO formulario de login (senha expirada,
+        # senha invalida, conta bloqueada...), nao ha 2FA nenhum - o codigo
+        # antigo enchia o campo de CPF com o TOTP e declarava OK em silencio.
+        # Descoberto em 10/07/2026: "Senha expirada. Solicite uma nova senha".
+        await asyncio.sleep(1)  # toast de erro do Keycloak renderiza pos-load
+        if await self._page.locator("input#password").count():
+            erro = await self._erro_sso()
+            raise RuntimeError(
+                f"Login rejeitado pelo SSO: {erro or 'formulario de login reapareceu'}. "
+                "Se a senha expirou/mudou, redefina no PDPJ e rode setup_credenciais.py."
+            )
+
+        # 2FA - campo de codigo e' o input de texto da tela do OTP
         codigo = await self._codigo_totp()
         await self._page.wait_for_selector("input[type='text']", timeout=15000)
         await self._page.fill("input[type='text']", codigo)
@@ -241,7 +254,38 @@ class PJeClient:
             except Exception:
                 await self._page.press("input[type='text']", "Enter")
         await self._page.wait_for_load_state("domcontentloaded", timeout=30000)
+
+        # So declara OK depois de SAIR do dominio do SSO: "OK" falso mascarava
+        # a falha e as tools quebravam depois com "nao consegui preencher campo".
+        try:
+            await self._page.wait_for_url(
+                lambda url: "sso.cloud.pje.jus.br" not in url, timeout=15000)
+        except Exception:
+            erro = await self._erro_sso()
+            raise RuntimeError(
+                f"Login nao completou (preso no SSO apos 2FA): "
+                f"{erro or self._page.url}. TOTP errado? Senha expirada?"
+            )
         _log(f"[LOGIN] OK")
+
+    async def _erro_sso(self):
+        """Extrai a mensagem de erro visivel na tela do SSO (Keycloak), se houver.
+
+        O toast de erro nem sempre usa classe .alert - varre o texto visivel
+        por linhas curtas com cara de erro de autenticacao.
+        """
+        try:
+            texto = await self._page.evaluate("() => document.body.innerText")
+            linhas = [l.strip() for l in texto.splitlines() if l.strip() and len(l.strip()) < 160]
+            # ordem = prioridade: frase de erro especifica ganha de texto de link generico
+            for chave in ("expirad", "inválid", "invalid", "incorret", "bloquead",
+                          "não foi possível", "tente novamente", "nova senha"):
+                for l in linhas:
+                    if chave in l.lower():
+                        return l
+        except Exception:
+            pass
+        return None
 
     async def _trocar_perfil(self):
         """Abre o dropdown do usuario e troca para a persona desejada.
@@ -606,8 +650,73 @@ class PJeClient:
             await self._fechar_aba_autos(aba)
 
     @staticmethod
+    def _extrair_movimentacoes_dom(html):
+        """Extrai movimentacoes parseando o DOM da timeline (scrapling.Selector).
+
+        Substitui o regex sobre inner_text, que tinha DOIS defeitos (descobertos
+        em 12/07/2026, validados contra o DataJud):
+        - so capturava o ULTIMO movimento de cada dia (o unico seguido da
+          linha de data no texto renderizado);
+        - atribuia a esse movimento a data do grupo SEGUINTE (mais antigo),
+          porque o cabecalho de data vem ANTES do grupo do dia na timeline.
+
+        Estrutura da timeline (form#divTimeLine):
+          div.media.data > span.data-interna   -> cabecalho "23 mar 2026"
+          div.media (demais) > div.media-body:
+            span.texto-movimento               -> tipo do movimento
+            div.anexos a span                  -> "92241811 - Despacho"
+            small.text-muted                   -> hora "20:22"
+          (div.media so de documento nao tem span.texto-movimento - ignorado)
+        """
+        def primeiro(el, sel):
+            r = el.css(sel)
+            return r[0] if r else None
+
+        page = Selector(html)
+        timeline = primeiro(page, "form#divTimeLine") or primeiro(page, "#divTimeLine")
+        if timeline is None:
+            return []
+
+        movimentacoes = []
+        data_atual = None
+        for media in timeline.css("div.media"):
+            classes = (media.attrib.get("class") or "").split()
+
+            if "data" in classes:
+                cabecalho = primeiro(media, "span.data-interna")
+                if cabecalho:
+                    data_atual = cabecalho.text.strip()
+                continue
+
+            tipo_el = primeiro(media, "span.texto-movimento")
+            if tipo_el is None:
+                continue
+
+            mov = {"tipo": tipo_el.text.strip(), "data": data_atual}
+
+            hora_el = primeiro(media, "small.text-muted")
+            if hora_el:
+                mov["hora"] = hora_el.text.strip()
+
+            anexo = primeiro(media, "div.anexos a span")
+            if anexo:
+                m = re.match(r"(\d{6,9})\s*-\s*(.+)", anexo.text.strip())
+                if m:
+                    mov["id"] = m.group(1)
+                    mov["descricao"] = m.group(2).strip()
+
+            movimentacoes.append(mov)
+
+        return movimentacoes
+
+    @staticmethod
     def _extrair_movimentacoes(texto):
-        """Extrai movimentacoes do texto da timeline dos autos."""
+        """Extrai movimentacoes do texto da timeline dos autos.
+
+        DEPRECATED como via principal: alem de perder movimentos, atribui
+        datas ERRADAS (ver _extrair_movimentacoes_dom). Mantido apenas como
+        fallback caso a estrutura da timeline mude e o parse DOM volte vazio.
+        """
         movimentacoes = []
         for m in re.finditer(
             r"([A-ZÁÉÍÓÚÂÊÔÃÕÇ][A-ZÁÉÍÓÚÂÊÔÃÕÇ\s\(\)\-\./]{8,}?)\n"
@@ -632,13 +741,28 @@ class PJeClient:
         """Retorna as ultimas N movimentacoes do processo."""
         aba = await self._abrir_autos_processo(numero_cnj)
         try:
-            texto = await aba.inner_text("body")
-            movimentacoes = self._extrair_movimentacoes(texto)
-            return {
+            html = await aba.content()
+            movimentacoes = self._extrair_movimentacoes_dom(html)
+            fallback_regex = False
+            if not movimentacoes:
+                # Estrutura da timeline mudou? Regex antigo como rede de
+                # seguranca (datas podem vir deslocadas - ver docstring).
+                _log("[PROC] Parse DOM vazio - usando fallback regex")
+                fallback_regex = True
+                texto = await aba.inner_text("body")
+                movimentacoes = self._extrair_movimentacoes(texto)
+            resultado = {
                 "numero_cnj": numero_cnj,
                 "total_encontrado": len(movimentacoes),
                 "movimentacoes": movimentacoes[:limite],
             }
+            if fallback_regex:
+                resultado["aviso"] = (
+                    "Extraido pelo fallback regex (parse DOM da timeline "
+                    "voltou vazio). As DATAS podem estar deslocadas - "
+                    "confirme antes de usar em prazo."
+                )
+            return resultado
         finally:
             await self._fechar_aba_autos(aba)
 
@@ -648,6 +772,7 @@ class PJeClient:
         aba = await self._abrir_autos_processo(numero_cnj)
         try:
             texto = await aba.inner_text("body")
+            html = await aba.content()
 
             relatorio = {
                 "numero_cnj": numero_cnj,
@@ -663,7 +788,14 @@ class PJeClient:
             if partes:
                 relatorio.update(partes)
 
-            movs = self._extrair_movimentacoes(texto)
+            movs = self._extrair_movimentacoes_dom(html)
+            if not movs:
+                _log("[PROC] Parse DOM vazio - usando fallback regex")
+                movs = self._extrair_movimentacoes(texto)
+                relatorio["aviso_movimentacoes"] = (
+                    "Movimentacoes extraidas pelo fallback regex - datas "
+                    "podem estar deslocadas."
+                )
             relatorio["ultimas_movimentacoes"] = movs[:10]
             relatorio["total_movimentacoes_encontradas"] = len(movs)
 
