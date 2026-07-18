@@ -1202,7 +1202,12 @@ class PJeClient:
 
             document.querySelectorAll('[onclick]').forEach(el => {
                 const oc = el.getAttribute('onclick') || '';
-                const m = oc.match(/abrirLinkDocumento\\\\(['\\"](\\\\d+)['\\"]\\\\)/);
+                // Regex via new RegExp pra nao brigar com o escape do literal
+                // Python: o /.../ antigo chegava corrompido no JS e este ramo
+                // NUNCA casava - mascarado pelo ramo dos spans acima, que
+                // encontrava os documentos primeiro. Descoberto em 18/07/2026
+                // ao portar o cliente pro TRF1.
+                const m = oc.match(new RegExp("abrirLinkDocumento\\\\('?(\\\\d+)'?\\\\)"));
                 if (m && !vistos.has(m[1])) {
                     vistos.add(m[1]);
                     let tipo = 'desconhecido';
