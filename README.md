@@ -1,5 +1,5 @@
 <h1 align="center">
-    <img alt="MCP PJe-TJPI 1º Grau" src="https://raw.githubusercontent.com/fxbarros/MCP-PJe-TJPI-1g/main/docs/assets/banner.svg?sanitize=true">
+    <img alt="MCP PJe-TJPI" src="https://raw.githubusercontent.com/fxbarros/MCP-PJe-TJPI-1g/main/docs/assets/banner.svg?sanitize=true">
     <br>
     <small>Expedientes, prazos e autos do PJe em linguagem natural — sem nunca escrever no tribunal</small>
 </h1>
@@ -26,13 +26,14 @@
     <a href="#%EF%B8%8F-avisos-importantes"><strong>Avisos</strong></a>
 </p>
 
-Servidor [MCP](https://modelcontextprotocol.io) que permite ao Claude Desktop consultar o **Processo Judicial Eletrônico** do Tribunal de Justiça do Piauí (PJe-TJPI) — **1º grau** — diretamente em linguagem natural.
+Servidor [MCP](https://modelcontextprotocol.io) que permite ao Claude Desktop consultar o **Processo Judicial Eletrônico** do Tribunal de Justiça do Piauí (PJe-TJPI) — **1º e 2º graus** — diretamente em linguagem natural.
 
-> ⚠️ **Este MCP acessa exclusivamente o 1º grau** (varas). Para 2º grau (câmaras, acórdãos, recursos), crie um MCP separado seguindo o mesmo padrão.
+> 🏛️ **Um MCP, dois graus**: todas as ferramentas aceitam o parâmetro `grau` — `"1"` (varas, padrão) ou `"2"` (câmaras, acórdãos, recursos). Basta dizer "no 2º grau" na conversa.
 
 ## ✨ Funcionalidades
 
 - 🔐 **Login 100% automatizado**: CPF + senha + 2FA (TOTP)
+- 🏛️ **1º e 2º graus** no mesmo servidor (parâmetro `grau`; autos baixados em pastas separadas por grau)
 - 👤 **Duas personas**: `advogado` (padrão) e `procurador` (Procuradoria do Município de Teresina)
 - 📋 **Expedientes pendentes**: intimações, despachos e prazos
 - ⏰ **Alertas de prazos urgentes** (3 dias)
@@ -41,7 +42,7 @@ Servidor [MCP](https://modelcontextprotocol.io) que permite ao Claude Desktop co
 - 📝 **Fluxo de produção**: modelos de petição, salvamento de petições e relatórios na pasta do processo
 - 🛡️ **Tratamento automático** do aviso da Resolução CNJ 121/2010 (processos de terceiros)
 
-## 🛠️ As 22 ferramentas
+## 🛠️ As 24 ferramentas
 
 **Painel e prazos**
 
@@ -50,6 +51,7 @@ Servidor [MCP](https://modelcontextprotocol.io) que permite ao Claude Desktop co
 | `expedientes_pendentes` | intimações/despachos pendentes de ciência ou resposta |
 | `verificar_prazos_urgentes` | expedientes com data limite em ≤ 3 dias |
 | `pendencias_processo` | pendências (expedientes + prazos) de UM processo |
+| `expedientes_do_processo` | histórico COMPLETO de expedientes de UM processo (aba Expedientes dos autos): ato, destinatário, via, expedição, ciência, prazo e data limite — inclusive já fechados/vencidos. Leitura passiva: não registra ciência |
 
 **Consulta e busca**
 
@@ -70,7 +72,8 @@ Servidor [MCP](https://modelcontextprotocol.io) que permite ao Claude Desktop co
 | `ultima_decisao` | teor da última decisão/sentença/despacho/ato ordinatório |
 | `ultimo_despacho` | teor do último despacho (só despacho) |
 | `baixar_documento` | baixa UM documento e salva na pasta do processo |
-| `baixar_processo` | baixa os autos COMPLETOS |
+| `baixar_processo` | baixa os autos COMPLETOS (padrão: em background, imune ao timeout do protocolo MCP) |
+| `status_download` | acompanha um download disparado em background |
 | `preparar_processo` | baixa o processo e decide a estratégia de análise |
 
 **Produção de peças (grava só no SEU disco, nunca no PJe)**
@@ -81,7 +84,7 @@ Servidor [MCP](https://modelcontextprotocol.io) que permite ao Claude Desktop co
 | `salvar_peticao_processo` | salva petição (.docx) na pasta do processo |
 | `salvar_relatorio_processo` | salva relatório de análise na pasta do processo |
 
-Todas aceitam o parâmetro opcional `persona`: `"advogado"` (padrão) ou `"procurador"`.
+Todas aceitam os parâmetros opcionais `persona` (`"advogado"` padrão ou `"procurador"`) e `grau` (`"1"` padrão ou `"2"`).
 
 ## 🧰 Requisitos
 
@@ -170,6 +173,10 @@ Liste os documentos do processo e lê a última decisão
 Baixa os autos completos e prepara o processo para análise
 
 Na persona de procurador do município, consulte o processo 0000000-00.0000.0.00.0000
+
+Consulte a apelação 0000000-00.0000.0.00.0000 no 2º grau
+
+Quais os expedientes do processo 0000000-00.0000.0.00.0000? Com datas de ciência e prazo
 ```
 
 ## 🏗️ Estrutura do projeto
@@ -180,8 +187,12 @@ mcp-pje-tjpi-1g/
 ├── requirements.txt       # dependências Python
 ├── setup_credenciais.py   # setup inicial (rodar 1x)
 └── src/
-    ├── pje_client.py      # cliente Playwright (automação do PJe)
-    └── server.py          # servidor MCP (expõe as tools ao Claude)
+    ├── pje_client.py         # cliente Playwright (automação do PJe, 1g/2g)
+    ├── cliente_singleton.py  # 1 sessão viva por (persona, grau) entre tool calls
+    ├── pje_downloader.py     # download de documentos/autos (+ jobs em background)
+    ├── minutas.py            # salvamento de petições/relatórios
+    ├── modelos.py            # modelos de petição no iCloud
+    └── server.py             # servidor MCP (expõe as tools ao Claude)
 ```
 
 ## 🔒 Segurança
@@ -201,11 +212,11 @@ mcp-pje-tjpi-1g/
 
 ## 🔄 Adaptando para outros tribunais
 
-A lógica geral (login SSO do CNJ, 2FA, estrutura do PJe) é compartilhada por vários tribunais. Para adaptar: mude a `URL_BASE` em `pje_client.py` (`https://pje.tjXX.jus.br/1g`), ajuste os seletores diferentes com o DevTools, verifique o layout das telas e renomeie o MCP em `server.py` (`FastMCP("pje-tjXX-1g")`).
+A lógica geral (login SSO do CNJ, 2FA, estrutura do PJe) é compartilhada por vários tribunais. Para adaptar: mude o host em `PJeClient.url_base` (`pje_client.py`; o grau já é parametrizado), ajuste os seletores diferentes com o DevTools, verifique o layout das telas e renomeie o MCP em `server.py` (`FastMCP("pje-tjXX")`).
 
 ## 🚧 Roadmap
 
-- [ ] MCP separado para 2º grau do TJPI
+- [x] ~~MCP separado para 2º grau do TJPI~~ → incorporado neste MCP via parâmetro `grau` (07/2026)
 - [ ] OCR para PDFs digitalizados sem texto extraível
 - [ ] Pauta de audiências
 
