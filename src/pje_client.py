@@ -22,7 +22,6 @@ import pyotp
 from playwright.async_api import async_playwright
 from scrapling.parser import Selector
 
-URL_BASE = "https://pje.tjpi.jus.br/1g"
 
 
 def _log(msg: str) -> None:
@@ -59,9 +58,10 @@ def _html_para_texto(html: str) -> str:
 
 
 class PJeClient:
-    """Cliente para automatizar consultas ao PJe-TJPI - 1o Grau."""
+    """Cliente para automatizar consultas ao PJe-TJPI (1º ou 2º grau)."""
 
-    def __init__(self, cpf, senha, totp_seed, persona="advogado", headless=True):
+    def __init__(self, cpf, senha, totp_seed, persona="advogado", headless=True,
+                 grau="1g"):
         """Inicializa o cliente.
 
         Args:
@@ -69,6 +69,7 @@ class PJeClient:
             senha: Senha do PDPJ
             totp_seed: Seed TOTP em Base32 (gerada ao configurar 2FA)
             persona: "advogado" (default) ou "procurador"
+            grau: "1g" (default) ou "2g" - instancia do PJe-TJPI a usar
             headless: True (default) - desde 2026-05-05 o Chromium headless
                 funciona no PJe-TJPI (a suspeita antiga de bloqueio nao se
                 reproduziu; ver nota em cliente_singleton). Use headless=False
@@ -84,6 +85,11 @@ class PJeClient:
                 f"Persona invalida: {persona}. Use 'advogado' ou 'procurador'."
             )
         self.persona = persona
+
+        if grau not in ("1g", "2g"):
+            raise ValueError(f"Grau invalido: {grau}. Use '1g' ou '2g'.")
+        self.grau = grau
+        self.url_base = f"https://pje.tjpi.jus.br/{grau}"
 
         self._pw = None
         self._browser = None
@@ -190,7 +196,7 @@ class PJeClient:
         tentar preencher o codigo TOTP.
         """
         _log(f"[LOGIN] Iniciando...")
-        await self._page.goto(f"{URL_BASE}/login.seam", wait_until="domcontentloaded")
+        await self._page.goto(f"{self.url_base}/login.seam", wait_until="domcontentloaded")
 
         # Se ja esta logado, login.seam redireciona pro painel ou mostra a mesma pagina
         # mas SEM o formulario de login. Detecta verificando se input#username existe.
@@ -347,7 +353,7 @@ class PJeClient:
         """Lista expedientes pendentes de ciencia/resposta."""
         _log(f"[EXP] Navegando pro painel...")
         await self._page.goto(
-            f"{URL_BASE}/Painel/painel_usuario/advogado.seam",
+            f"{self.url_base}/Painel/painel_usuario/advogado.seam",
             wait_until="domcontentloaded"
         )
         await asyncio.sleep(3)
@@ -448,7 +454,7 @@ class PJeClient:
         self._ultimo_processo_foi_terceiro = False
         _log(f"[PROC] Buscando {numero_cnj}...")
         await self._page.goto(
-            f"{URL_BASE}/Processo/ConsultaProcesso/listView.seam",
+            f"{self.url_base}/Processo/ConsultaProcesso/listView.seam",
             wait_until="domcontentloaded"
         )
 
@@ -766,6 +772,121 @@ class PJeClient:
         finally:
             await self._fechar_aba_autos(aba)
 
+
+    @staticmethod
+    def _extrair_expedientes_dom(html):
+        """Parseia a tabela da aba Expedientes dos autos (scrapling.Selector).
+
+        Estrutura (table#processoParteExpedienteMenuGridList):
+          tr.rich-table-row > td.rich-table-cell x4:
+            [0] blob: "Despacho (16911904) - Prioridade: Normal - ID do
+                documento (93044965) FULANO Diário Eletrônico (23/03/2026
+                20:22:49) O sistema registrou ciência em 26/03/2026 00:00:00
+                Prazo: 15 dias"
+            [1] data limite: "22/04/2026 23:59:59 (para manifestação)"
+            [2] acoes (ignorada)
+            [3] fechado: "SIM"/"NÃO"
+        """
+        page = Selector(html)
+        tabelas = page.css("table#processoParteExpedienteMenuGridList")
+        if not tabelas:
+            return []
+
+        expedientes = []
+        for tr in tabelas[0].css("tr.rich-table-row"):
+            tds = tr.css("td.rich-table-cell")
+            if len(tds) < 2:
+                continue
+            blob = re.sub(r"\s+", " ", tds[0].get_all_text(strip=True) or "").strip()
+            exp = {}
+
+            m = re.match(r"(.+?)\s*\((\d+)\)", blob)
+            if m:
+                exp["ato"] = m.group(1).strip()
+                exp["id_expediente"] = m.group(2)
+            m = re.search(r"Prioridade:\s*([\wÀ-ÿ]+)", blob)
+            if m:
+                exp["prioridade"] = m.group(1)
+            m_id = re.search(r"ID do documento\s*\((\d+)\)", blob)
+            if m_id:
+                exp["id_documento"] = m_id.group(1)
+
+            # regiao entre o id do documento e a data de expedicao contem
+            # "DESTINATARIO [Representante: ...] VIA". A data de expedicao e'
+            # a PRIMEIRA data entre parenteses apos o id (expedientes sem
+            # ciencia registrada nao tem a frase "O sistema registrou").
+            m_data = None
+            if m_id:
+                m_data = re.search(
+                    r"\((\d{2}/\d{2}/\d{4}[ \d:]*)\)", blob[m_id.end():]
+                )
+            if m_id and m_data:
+                exp["data_expedicao"] = m_data.group(1).strip()
+                regiao = blob[m_id.end():m_id.end() + m_data.start()].strip(" -")
+                m_via = re.search(
+                    r"(Diário Eletrônico|Expedição eletrônica|Central de Mandados"
+                    r"|Sistema|Correios|Edital|Carta precatória)\s*$",
+                    regiao, re.I,
+                )
+                if m_via:
+                    exp["via"] = m_via.group(1)
+                    regiao = regiao[:m_via.start()]
+                if "Representante:" in regiao:
+                    regiao, rep = regiao.split("Representante:", 1)
+                    exp["representante"] = rep.strip()
+                exp["destinatario"] = regiao.strip()
+
+            m = re.search(r"registrou ciência em\s*(\d{2}/\d{2}/\d{4}[ \d:]*)", blob)
+            if m:
+                exp["ciencia_em"] = m.group(1).strip()
+            m = re.search(r"Prazo:\s*(.+)$", blob)
+            if m:
+                exp["prazo"] = m.group(1).strip()
+
+            texto_limite = re.sub(r"\s+", " ", tds[1].get_all_text(strip=True) or "")
+            m = re.search(r"(\d{2}/\d{2}/\d{4}[ \d:]*)", texto_limite)
+            if m:
+                exp["data_limite"] = m.group(1).strip()
+            m = re.search(r"\(para ([^)]+)\)", texto_limite)
+            if m:
+                exp["finalidade"] = m.group(1).strip()
+
+            if len(tds) >= 4:
+                fechado = (tds[3].get_all_text(strip=True) or "").strip().upper()
+                if fechado in ("SIM", "NÃO", "NAO"):
+                    exp["fechado"] = fechado == "SIM"
+
+            expedientes.append(exp)
+        return expedientes
+
+    @_serializa
+    async def expedientes_do_processo(self, numero_cnj):
+        """Le a aba 'Expedientes' dos autos: historico COMPLETO dos atos de
+        comunicacao (expedicao, ciencia, prazo, data limite), incluindo os ja
+        fechados/vencidos - que nao aparecem mais no painel de pendentes.
+
+        Leitura passiva: a aba apenas lista; visualizar NAO registra ciencia.
+        """
+        aba = await self._abrir_autos_processo(numero_cnj)
+        try:
+            await aba.locator("a[id='navbar:linkAbaExpedientes1']").click(timeout=10000)
+            try:
+                await aba.wait_for_selector(
+                    "table[id='processoParteExpedienteMenuGridList']", timeout=15000
+                )
+            except Exception:
+                pass  # processo sem expedientes nao renderiza a tabela
+            html = await aba.content()
+            expedientes = self._extrair_expedientes_dom(html)
+            return {
+                "numero_cnj": numero_cnj,
+                "total": len(expedientes),
+                "expedientes": expedientes,
+                "fonte": "aba Expedientes dos autos (inclui fechados/vencidos)",
+            }
+        finally:
+            await self._fechar_aba_autos(aba)
+
     @_serializa
     async def relatorio_processo(self, numero_cnj):
         """Relatorio completo: dados + movimentacoes + documentos."""
@@ -825,7 +946,7 @@ class PJeClient:
         """
         _log(f"[BUSCA] Preenchendo {campo}={valor}")
         await self._page.goto(
-            f"{URL_BASE}/Processo/ConsultaProcesso/listView.seam",
+            f"{self.url_base}/Processo/ConsultaProcesso/listView.seam",
             wait_until="domcontentloaded"
         )
         await asyncio.sleep(2)
@@ -1118,8 +1239,8 @@ class PJeClient:
     def _url_documento_rest(self, documento_id):
         """URL REST de download direto de um documento (mesma da arvore)."""
         return (
-            f"{URL_BASE}/seam/resource/rest/pje-legacy/documento/download/"
-            f"TJPI/1g/{self._ultimo_processo_id}/{documento_id}"
+            f"{self.url_base}/seam/resource/rest/pje-legacy/documento/download/"
+            f"TJPI/{self.grau}/{self._ultimo_processo_id}/{documento_id}"
         )
 
     async def _ler_documento_rest(self, numero_cnj, id_documento, max_paginas=30):

@@ -82,10 +82,10 @@ async def _lifespan(_server):
             pass
 
 
-mcp = FastMCP("pje-tjpi-1g", lifespan=_lifespan)
+mcp = FastMCP("pje-tjpi", lifespan=_lifespan)
 
 TRIBUNAL = "TJPI"
-GRAU = "1º grau"
+GRAUS_LEGIVEIS = {"1g": "1º grau", "2g": "2º grau"}
 
 
 def _normaliza_persona(persona: str) -> str:
@@ -98,10 +98,20 @@ def _normaliza_persona(persona: str) -> str:
     return "advogado"
 
 
-def _marcar_grau(r: dict, persona: str) -> dict:
+def _normaliza_grau(grau: str) -> str:
+    """Normaliza variacoes de texto para '1g' ou '2g'."""
+    if not grau:
+        return "1g"
+    g = str(grau).strip().lower()
+    if any(k in g for k in ["2", "segundo", "apela", "camara", "câmara", "tribunal"]):
+        return "2g"
+    return "1g"
+
+
+def _marcar_grau(r: dict, persona: str, grau: str = "1g") -> dict:
     """Adiciona metadados de tribunal/grau/persona ao retorno."""
     r["tribunal"] = TRIBUNAL
-    r["grau"] = GRAU
+    r["grau"] = GRAUS_LEGIVEIS.get(grau, grau)
     r["persona_utilizada"] = persona
     return r
 
@@ -111,18 +121,20 @@ def _marcar_grau(r: dict, persona: str) -> dict:
 # =========================================================================
 
 @mcp.tool()
-async def expedientes_pendentes(persona: str = "advogado") -> dict:
-    """[TJPI - 1o GRAU] Lista expedientes pendentes de ciencia/resposta."""
+async def expedientes_pendentes(persona: str = "advogado", grau: str = "1") -> dict:
+    """[TJPI 1g|2g] Lista expedientes pendentes de ciencia/resposta."""
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
-    return _marcar_grau(await pje.expedientes_pendentes(), p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
+    return _marcar_grau(await pje.expedientes_pendentes(), p, g)
 
 
 @mcp.tool()
-async def verificar_prazos_urgentes(persona: str = "advogado") -> dict:
-    """[TJPI - 1o GRAU] Retorna expedientes com data limite em ate 3 dias."""
+async def verificar_prazos_urgentes(persona: str = "advogado", grau: str = "1") -> dict:
+    """[TJPI 1g|2g] Retorna expedientes com data limite em ate 3 dias."""
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
     r = await pje.expedientes_pendentes()
 
     hoje = datetime.now()
@@ -143,7 +155,7 @@ async def verificar_prazos_urgentes(persona: str = "advogado") -> dict:
         "total_urgentes": len(urgentes),
         "total_expedientes": len(r.get("expedientes", [])),
         "urgentes": urgentes,
-    }, p)
+    }, p, g)
 
 
 # =========================================================================
@@ -151,29 +163,32 @@ async def verificar_prazos_urgentes(persona: str = "advogado") -> dict:
 # =========================================================================
 
 @mcp.tool()
-async def consultar_processo(numero_cnj: str, persona: str = "advogado") -> dict:
-    """[TJPI - 1o GRAU] Consulta dados basicos de um processo pelo numero CNJ."""
+async def consultar_processo(numero_cnj: str, persona: str = "advogado", grau: str = "1") -> dict:
+    """[TJPI 1g|2g] Consulta dados basicos de um processo pelo numero CNJ."""
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
-    return _marcar_grau(await pje.buscar_processo(numero_cnj), p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
+    return _marcar_grau(await pje.buscar_processo(numero_cnj), p, g)
 
 
 @mcp.tool()
 async def ultimas_movimentacoes(
-    numero_cnj: str, limite: int = 5, persona: str = "advogado"
+    numero_cnj: str, limite: int = 5, persona: str = "advogado", grau: str = "1"
 ) -> dict:
-    """[TJPI - 1o GRAU] Lista as ultimas N movimentacoes (padrao 5)."""
+    """[TJPI 1g|2g] Lista as ultimas N movimentacoes (padrao 5)."""
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
-    return _marcar_grau(await pje.ultimas_movimentacoes(numero_cnj, limite), p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
+    return _marcar_grau(await pje.ultimas_movimentacoes(numero_cnj, limite), p, g)
 
 
 @mcp.tool()
-async def relatorio_processo(numero_cnj: str, persona: str = "advogado") -> dict:
-    """[TJPI - 1o GRAU] Relatorio completo: dados, partes, movimentacoes, documentos."""
+async def relatorio_processo(numero_cnj: str, persona: str = "advogado", grau: str = "1") -> dict:
+    """[TJPI 1g|2g] Relatorio completo: dados, partes, movimentacoes, documentos."""
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
-    return _marcar_grau(await pje.relatorio_processo(numero_cnj), p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
+    return _marcar_grau(await pje.relatorio_processo(numero_cnj), p, g)
 
 
 # =========================================================================
@@ -182,52 +197,57 @@ async def relatorio_processo(numero_cnj: str, persona: str = "advogado") -> dict
 
 @mcp.tool()
 async def buscar_por_nome_parte(
-    nome: str, limite: int = 20, persona: str = "advogado"
+    nome: str, limite: int = 20, persona: str = "advogado", grau: str = "1"
 ) -> dict:
-    """[TJPI - 1o GRAU] Busca processos pelo NOME de uma parte (autor ou reu)."""
+    """[TJPI 1g|2g] Busca processos pelo NOME de uma parte (autor ou reu)."""
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
-    return _marcar_grau(await pje.buscar_por_nome_parte(nome, limite), p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
+    return _marcar_grau(await pje.buscar_por_nome_parte(nome, limite), p, g)
 
 
 @mcp.tool()
 async def buscar_por_nome_advogado(
-    nome: str, limite: int = 20, persona: str = "advogado"
+    nome: str, limite: int = 20, persona: str = "advogado", grau: str = "1"
 ) -> dict:
-    """[TJPI - 1o GRAU] Busca processos pelo NOME do advogado/representante."""
+    """[TJPI 1g|2g] Busca processos pelo NOME do advogado/representante."""
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
-    return _marcar_grau(await pje.buscar_por_nome_advogado(nome, limite), p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
+    return _marcar_grau(await pje.buscar_por_nome_advogado(nome, limite), p, g)
 
 
 @mcp.tool()
 async def buscar_por_cpf(
-    cpf_busca: str, limite: int = 20, persona: str = "advogado"
+    cpf_busca: str, limite: int = 20, persona: str = "advogado", grau: str = "1"
 ) -> dict:
-    """[TJPI - 1o GRAU] Busca processos pelo CPF de uma das partes."""
+    """[TJPI 1g|2g] Busca processos pelo CPF de uma das partes."""
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
-    return _marcar_grau(await pje.buscar_por_cpf(cpf_busca, limite), p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
+    return _marcar_grau(await pje.buscar_por_cpf(cpf_busca, limite), p, g)
 
 
 @mcp.tool()
 async def buscar_por_cnpj(
-    cnpj: str, limite: int = 20, persona: str = "advogado"
+    cnpj: str, limite: int = 20, persona: str = "advogado", grau: str = "1"
 ) -> dict:
-    """[TJPI - 1o GRAU] Busca processos pelo CNPJ de uma das partes."""
+    """[TJPI 1g|2g] Busca processos pelo CNPJ de uma das partes."""
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
-    return _marcar_grau(await pje.buscar_por_cnpj(cnpj, limite), p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
+    return _marcar_grau(await pje.buscar_por_cnpj(cnpj, limite), p, g)
 
 
 @mcp.tool()
 async def buscar_por_oab(
-    numero_oab: str, uf: str = "PI", limite: int = 20, persona: str = "advogado"
+    numero_oab: str, uf: str = "PI", limite: int = 20, persona: str = "advogado", grau: str = "1"
 ) -> dict:
-    """[TJPI - 1o GRAU] Busca processos pelo numero OAB do advogado."""
+    """[TJPI 1g|2g] Busca processos pelo numero OAB do advogado."""
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
-    return _marcar_grau(await pje.buscar_por_oab(numero_oab, uf.upper(), limite), p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
+    return _marcar_grau(await pje.buscar_por_oab(numero_oab, uf.upper(), limite), p, g)
 
 
 # =========================================================================
@@ -235,11 +255,12 @@ async def buscar_por_oab(
 # =========================================================================
 
 @mcp.tool()
-async def listar_documentos(numero_cnj: str, persona: str = "advogado") -> dict:
-    """[TJPI - 1o GRAU] Lista todos os documentos do processo (id + tipo)."""
+async def listar_documentos(numero_cnj: str, persona: str = "advogado", grau: str = "1") -> dict:
+    """[TJPI 1g|2g] Lista todos os documentos do processo (id + tipo)."""
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
-    return _marcar_grau(await pje.listar_documentos(numero_cnj), p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
+    return _marcar_grau(await pje.listar_documentos(numero_cnj), p, g)
 
 
 @mcp.tool()
@@ -248,16 +269,18 @@ async def ler_documento(
     id_documento: str,
     max_paginas: int = 30,
     persona: str = "advogado",
+    grau: str = "1",
 ) -> dict:
-    """[TJPI - 1o GRAU] Le o teor completo de um documento (HTML ou PDF).
+    """[TJPI 1g|2g] Le o teor completo de um documento (HTML ou PDF).
 
     PDFs com mais de max_paginas paginas voltam truncados, com truncado=True
     e aviso explicito no retorno.
     """
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
     return _marcar_grau(
-        await pje.ler_documento(numero_cnj, str(id_documento), max_paginas), p
+        await pje.ler_documento(numero_cnj, str(id_documento), max_paginas), p, g
     )
 
 
@@ -266,15 +289,16 @@ async def ler_documento(
 # =========================================================================
 
 @mcp.tool()
-async def ultima_decisao(numero_cnj: str, persona: str = "advogado") -> dict:
+async def ultima_decisao(numero_cnj: str, persona: str = "advogado", grau: str = "1") -> dict:
     """
-    [TJPI - 1o GRAU] Le o teor da ultima decisao/sentenca/despacho/ato ordinatorio.
+    [TJPI 1g|2g] Le o teor da ultima decisao/sentenca/despacho/ato ordinatorio.
 
     Abre os autos UMA vez, filtra os decisorios, escolhe o de maior ID
     (mais recente) e devolve o teor completo. NAO baixa o processo todo.
     """
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
     r = await pje.ler_documento_filtrado(
         numero_cnj,
         r"(decis[ãa]o|senten[çc]a|despacho|ato\s+ordinat[óo]rio)",
@@ -285,30 +309,32 @@ async def ultima_decisao(numero_cnj: str, persona: str = "advogado") -> dict:
             "Nenhuma decisao/sentenca/despacho encontrado nos documentos listados.",
         )
         r["numero_cnj"] = numero_cnj
-    return _marcar_grau(r, p)
+    return _marcar_grau(r, p, g)
 
 
 @mcp.tool()
-async def ultimo_despacho(numero_cnj: str, persona: str = "advogado") -> dict:
-    """[TJPI - 1o GRAU] Le o teor do ultimo despacho (so despacho, nao decisao)."""
+async def ultimo_despacho(numero_cnj: str, persona: str = "advogado", grau: str = "1") -> dict:
+    """[TJPI 1g|2g] Le o teor do ultimo despacho (so despacho, nao decisao)."""
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
     r = await pje.ler_documento_filtrado(numero_cnj, r"despacho")
     if not r.get("encontrado"):
         r.setdefault("aviso", "Nenhum despacho encontrado.")
         r["numero_cnj"] = numero_cnj
-    return _marcar_grau(r, p)
+    return _marcar_grau(r, p, g)
 
 
 @mcp.tool()
-async def pendencias_processo(numero_cnj: str, persona: str = "advogado") -> dict:
+async def pendencias_processo(numero_cnj: str, persona: str = "advogado", grau: str = "1") -> dict:
     """
-    [TJPI - 1o GRAU] Retorna pendencias (expedientes + prazos) de UM processo.
+    [TJPI 1g|2g] Retorna pendencias (expedientes + prazos) de UM processo.
 
     Filtra os expedientes pendentes pelo numero do processo.
     """
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
     r = await pje.expedientes_pendentes()
 
     cnj_normalizado = re.sub(r"\D", "", numero_cnj)
@@ -328,7 +354,7 @@ async def pendencias_processo(numero_cnj: str, persona: str = "advogado") -> dic
         "numero_cnj": numero_cnj,
         "total_pendencias": len(pendencias),
         "pendencias": pendencias,
-    }, p)
+    }, p, g)
 
 
 # =========================================================================
@@ -336,27 +362,43 @@ async def pendencias_processo(numero_cnj: str, persona: str = "advogado") -> dic
 # =========================================================================
 
 @mcp.tool()
+async def expedientes_do_processo(numero_cnj: str, persona: str = "advogado", grau: str = "1") -> dict:
+    """
+    [TJPI 1g|2g] Historico COMPLETO de expedientes de UM processo (aba
+    Expedientes dos autos): ato, destinatario, via, data de expedicao,
+    data da ciencia, prazo e data limite - INCLUSIVE expedientes ja
+    fechados/vencidos, que nao aparecem em pendencias_processo.
+    """
+    p = _normaliza_persona(persona)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
+    return _marcar_grau(await pje.expedientes_do_processo(numero_cnj), p, g)
+
+
+@mcp.tool()
 async def baixar_documento(
     numero_cnj: str,
     id_documento: str,
     tipo_descritivo: str = "",
     persona: str = "advogado",
+    grau: str = "1",
 ) -> dict:
     """
-    [TJPI - 1o GRAU] Baixa UM documento especifico e salva no iCloud.
+    [TJPI 1g|2g] Baixa UM documento especifico e salva no iCloud.
 
     Pasta: ~/Library/Mobile Documents/.../Processos TJPI 1 Grau/{cnj}/documentos/
 
     - tipo_descritivo: opcional, vai pro nome do arquivo (ex: 'Despacho')
     """
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
     # garantir_processo_id (chamado dentro do downloader) abre os autos so
     # se necessario e FECHA a aba - antes a aba ficava vazando no singleton
     r = await pje_downloader.salvar_documento(
         pje, numero_cnj, str(id_documento), tipo_descritivo
     )
-    return _marcar_grau(r, p)
+    return _marcar_grau(r, p, g)
 
 
 @mcp.tool()
@@ -366,10 +408,12 @@ async def baixar_processo(
     limite: int = 0,
     cronologia: str = "decrescente",
     forcar: bool = False,
+    background: bool = True,
     persona: str = "advogado",
+    grau: str = "1",
 ) -> dict:
     """
-    [TJPI - 1o GRAU] Baixa os autos COMPLETOS do processo.
+    [TJPI 1g|2g] Baixa os autos COMPLETOS do processo.
 
     Salva PDF consolidado em: Processos TJPI 1 Grau/{cnj}/{cnj}.pdf
     (so no metodo nativo; doc_a_doc consolida com sufixo proprio e tambem
@@ -384,9 +428,25 @@ async def baixar_processo(
               [aplicavel apenas em metodo='doc_a_doc']
     - cronologia: 'decrescente' (default, mais recente primeiro) | 'crescente'
     - forcar: True pra re-baixar mesmo se ja existir cache
+    - background: True (default, so vale pro metodo 'nativo') dispara o
+              download num task que sobrevive ao timeout do protocolo MCP.
+              Processo pequeno resolve na 1a chamada (status='concluido');
+              processo grande retorna status='em_andamento' - acompanhe com
+              a tool status_download. Use background=False pra forcar a
+              chamada sincrona antiga (bloqueia; estoura em autos grandes).
+
+    Retorna dict com 'status': 'concluido' | 'em_andamento' | 'erro'.
     """
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
+
+    if metodo == "nativo" and background:
+        r = await pje_downloader.baixar_processo_background(
+            pje, numero_cnj=numero_cnj, cronologia=cronologia, forcar=forcar
+        )
+        return _marcar_grau(r, p, g)
+
     r = await pje_downloader.baixar_processo_completo(
         pje,
         numero_cnj=numero_cnj,
@@ -395,24 +455,42 @@ async def baixar_processo(
         metodo=metodo,
         limite=limite,
     )
-    return _marcar_grau(r, p)
+    r.setdefault("status", "concluido")
+    return _marcar_grau(r, p, g)
+
+
+@mcp.tool()
+async def status_download(numero_cnj: str, persona: str = "advogado", grau: str = "1") -> dict:
+    """
+    [TJPI 1g|2g] Consulta o andamento de um download disparado em
+    background por baixar_processo.
+
+    status: 'em_andamento' (servidor ainda gerando/baixando - reconsulte em
+    ~30-60s) | 'concluido' (traz caminho + tamanho_mb) | 'erro' | 'inexistente'.
+
+    Nao reabre o browser nem trava - so le o registro de jobs e o disco.
+    """
+    p = _normaliza_persona(persona)
+    g = _normaliza_grau(grau)
+    return _marcar_grau(pje_downloader.status_download(numero_cnj, g), p, g)
 
 
 @mcp.tool()
 async def preparar_processo(
-    numero_cnj: str, forcar: bool = False, persona: str = "advogado"
+    numero_cnj: str, forcar: bool = False, persona: str = "advogado", grau: str = "1"
 ) -> dict:
     """
-    [TJPI - 1o GRAU] Baixa o processo + decide estrategia de analise.
+    [TJPI 1g|2g] Baixa o processo + decide estrategia de analise.
 
     Retorna:
     - estrategia='pdf_direto' (≤18 MB): Claude le o PDF direto
     - estrategia='notebooklm' (>18 MB): instrucoes pro Claude usar NotebookLM
     """
     p = _normaliza_persona(persona)
-    pje = await cliente_singleton.get_cliente(p)
+    g = _normaliza_grau(grau)
+    pje = await cliente_singleton.get_cliente(p, g)
     r = await pje_downloader.preparar_processo_orquestrador(pje, numero_cnj, forcar=forcar)
-    return _marcar_grau(r, p)
+    return _marcar_grau(r, p, g)
 
 
 # =========================================================================
@@ -422,7 +500,7 @@ async def preparar_processo(
 @mcp.tool()
 async def listar_modelos_peticao() -> dict:
     """
-    [TJPI - 1o GRAU] Lista modelos de peticao/relatorio em iCloud.
+    [TJPI 1g|2g] Lista modelos de peticao/relatorio em iCloud.
 
     Pasta: ~/Library/Mobile Documents/com~apple~CloudDocs/Modelos TJPI 1 Grau/
     """
@@ -431,7 +509,7 @@ async def listar_modelos_peticao() -> dict:
 
 @mcp.tool()
 async def ler_modelo_peticao(arquivo: str) -> dict:
-    """[TJPI - 1o GRAU] Le o conteudo textual de um modelo (.docx/.md/.txt)."""
+    """[TJPI 1g|2g] Le o conteudo textual de um modelo (.docx/.md/.txt)."""
     return modelos.ler_modelo(arquivo)
 
 
@@ -441,14 +519,16 @@ async def salvar_peticao_processo(
     conteudo: str,
     tipo: str = "Petição",
     formato: str = "docx",
+    grau: str = "1",
 ) -> dict:
     """
-    [TJPI - 1o GRAU] Salva uma peticao na pasta do processo.
+    [TJPI 1g|2g] Salva uma peticao na pasta do processo.
 
     - tipo: 'Petição', 'Manifestação', 'Embargos', 'Recurso', 'Contestação'
     - formato: 'docx' (default) | 'md' | 'txt'
     """
-    return minutas.salvar_peca(numero_cnj, conteudo, tipo=tipo, formato=formato)
+    return minutas.salvar_peca(numero_cnj, conteudo, tipo=tipo, formato=formato,
+                               grau=_normaliza_grau(grau))
 
 
 @mcp.tool()
@@ -456,9 +536,11 @@ async def salvar_relatorio_processo(
     numero_cnj: str,
     conteudo: str,
     formato: str = "docx",
+    grau: str = "1",
 ) -> dict:
-    """[TJPI - 1o GRAU] Salva um relatorio de analise na pasta do processo."""
-    return minutas.salvar_peca(numero_cnj, conteudo, tipo="Relatório", formato=formato)
+    """[TJPI 1g|2g] Salva um relatorio de analise na pasta do processo."""
+    return minutas.salvar_peca(numero_cnj, conteudo, tipo="Relatório", formato=formato,
+                               grau=_normaliza_grau(grau))
 
 
 if __name__ == "__main__":

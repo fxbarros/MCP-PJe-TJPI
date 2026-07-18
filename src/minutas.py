@@ -33,6 +33,7 @@ def salvar_peca(
     conteudo: str,
     tipo: str = "Petição",
     formato: str = "docx",
+    grau: str = "1g",
 ) -> dict:
     """Salva uma peca (peticao/relatorio/manifestacao/etc) na pasta do processo.
 
@@ -42,7 +43,7 @@ def salvar_peca(
     if formato not in {"docx", "md", "txt"}:
         raise ValueError(f"Formato invalido: {formato}. Use docx/md/txt.")
 
-    pasta = pasta_processo(numero_cnj)
+    pasta = pasta_processo(numero_cnj, grau)
     # Sanitiza tipo e cnj pro nome do arquivo (mesma regra da pasta) -
     # evita separadores de caminho e afins vindos dos parametros
     tipo_seguro = re.sub(r"[^\w À-ÿ.-]", "_", tipo).strip() or "Documento"

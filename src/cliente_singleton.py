@@ -6,8 +6,8 @@ evitando logins repetidos (que disparam rate-limiting do TJ-PI).
 Comportamento:
 - Startup do server: warmup() faz login antecipado em background (evita
   -32001 na 1a tool call a frio)
-- Chamadas seguintes em <5min, mesma persona: reusa (~5-10s, sem login)
-- Troca de persona OU >5min sem uso: fecha o anterior e cria novo
+- Chamadas seguintes em <5min, mesma persona+grau: reusa (~5-10s, sem login)
+- Troca de persona/grau OU >5min sem uso: fecha o anterior e cria novo
 - Watchdog do server chama fechar_se_ocioso() periodicamente: fecha o
   Chromium DE FATO apos o timeout (nao so na proxima chamada)
 - Shutdown (lifespan do server) + atexit (backstop): cleanup
@@ -34,7 +34,7 @@ TIMEOUT_INATIVIDADE_S = 300  # 5 minutos
 
 # Estado global do singleton
 _cliente: Optional[PJeClient] = None
-_persona_ativa: Optional[str] = None
+_chave_ativa: Optional[tuple] = None  # (persona, grau)
 _ultimo_uso: float = 0
 _lock = asyncio.Lock()
 
@@ -55,13 +55,14 @@ def _get_creds():
     return cpf, senha, seed
 
 
-async def get_cliente(persona: str = "advogado") -> PJeClient:
+async def get_cliente(persona: str = "advogado", grau: str = "1g") -> PJeClient:
     """Retorna um PJeClient pronto pra uso.
 
-    Reusa a sessao existente se ainda valida (mesma persona, <5min de
-    inatividade). Senao cria uma nova.
+    Reusa a sessao existente se ainda valida (mesma persona e grau, <5min
+    de inatividade). Senao cria uma nova.
     """
-    global _cliente, _persona_ativa, _ultimo_uso
+    global _cliente, _chave_ativa, _ultimo_uso
+    chave = (persona, grau)
 
     async with _lock:
         agora = time.time()
@@ -85,7 +86,7 @@ async def get_cliente(persona: str = "advogado") -> PJeClient:
 
         if (
             _cliente is not None
-            and _persona_ativa == persona
+            and _chave_ativa == chave
             and idade < TIMEOUT_INATIVIDADE_S
             and browser_vivo
         ):
@@ -97,8 +98,8 @@ async def get_cliente(persona: str = "advogado") -> PJeClient:
         if _cliente is not None:
             if not browser_vivo:
                 motivo = "browser fechado/desconectado"
-            elif _persona_ativa != persona:
-                motivo = "troca de persona"
+            elif _chave_ativa != chave:
+                motivo = "troca de persona/grau"
             else:
                 motivo = f"timeout ({idade:.0f}s > {TIMEOUT_INATIVIDADE_S}s)"
             _log(f"[SINGLETON] Fechando sessao anterior ({motivo})")
@@ -107,7 +108,7 @@ async def get_cliente(persona: str = "advogado") -> PJeClient:
             except Exception as e:
                 _log(f"[SINGLETON] Erro ao fechar (ignorado): {e}")
             _cliente = None
-            _persona_ativa = None
+            _chave_ativa = None
 
         # Cria novo cliente + login.
         # HEADLESS=True por default (descoberto em 2026-05-05): com Playwright
@@ -119,15 +120,15 @@ async def get_cliente(persona: str = "advogado") -> PJeClient:
         # Pra forcar HEADED de novo (debug visual): PJE_HEADLESS=0 ...
         headless_env = os.environ.get("PJE_HEADLESS", "1") == "1"
 
-        _log(f"[SINGLETON] Criando nova sessao (persona={persona}, headless={headless_env})")
+        _log(f"[SINGLETON] Criando nova sessao (persona={persona}, grau={grau}, headless={headless_env})")
         cpf, senha, seed = _get_creds()
-        novo = PJeClient(cpf, senha, seed, persona=persona, headless=headless_env)
+        novo = PJeClient(cpf, senha, seed, persona=persona, headless=headless_env, grau=grau)
         await novo._iniciar()
         await novo._login()
         await novo._trocar_perfil()
 
         _cliente = novo
-        _persona_ativa = persona
+        _chave_ativa = chave
         _ultimo_uso = agora
         return _cliente
 
@@ -157,7 +158,7 @@ async def fechar_se_ocioso() -> bool:
     ficava vivo indefinidamente entre chamadas (o timeout so era checado
     lazy, na chamada seguinte).
     """
-    global _cliente, _persona_ativa
+    global _cliente, _chave_ativa
     async with _lock:
         if _cliente is None:
             return False
@@ -174,13 +175,13 @@ async def fechar_se_ocioso() -> bool:
             except Exception as e:
                 _log(f"[SINGLETON] Erro ao fechar (ignorado): {e}")
         _cliente = None
-        _persona_ativa = None
+        _chave_ativa = None
         return True
 
 
 async def fechar_cliente():
     """Fecha a sessao atual (chamado no shutdown do server/atexit)."""
-    global _cliente, _persona_ativa, _ultimo_uso
+    global _cliente, _chave_ativa, _ultimo_uso
     if _cliente is not None:
         _log("[SINGLETON] Cleanup atexit - fechando sessao")
         try:
@@ -188,7 +189,7 @@ async def fechar_cliente():
         except Exception as e:
             _log(f"[SINGLETON] Erro no cleanup: {e}")
         _cliente = None
-        _persona_ativa = None
+        _chave_ativa = None
         _ultimo_uso = 0
 
 
