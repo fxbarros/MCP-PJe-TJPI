@@ -1,6 +1,6 @@
 """Salvamento de peticoes e relatorios na pasta do processo (iCloud).
 
-Pasta: ~/Library/Mobile Documents/.../Processos TJPI 1 Grau/{cnj}/
+Pasta: ~/Library/Mobile Documents/.../Processos TJPI {1,2} Grau/{cnj}/ (por grau)
 Arquivos: '{tipo} {cnj}.docx' (ex: 'Peticao 0000000-00.0000.0.00.0000.docx')
 Se ja existir arquivo com o mesmo nome, versiona: '{tipo} {cnj} (2).docx' etc.
 """

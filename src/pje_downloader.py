@@ -1,11 +1,11 @@
-"""Download de documentos e processos do PJe-TJPI 1o Grau.
+"""Download de documentos e processos do PJe-TJPI (1o e 2o graus).
 
 Primitivas:
 - baixar_documento_bytes: baixa 1 doc como bytes (PDF ou HTML)
 - salvar_documento: salva 1 doc na pasta do processo
 
 Constantes:
-- PASTA_PROCESSOS: ~/Library/Mobile Documents/.../Processos TJPI 1 Grau/
+- _PASTAS: ~/Library/Mobile Documents/.../Processos TJPI {1,2} Grau/ (por grau)
 - LIMITE_PDF_DIRETO_MB: 18 MB (acima vai pro NotebookLM)
 """
 import asyncio

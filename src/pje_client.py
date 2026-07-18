@@ -1,4 +1,4 @@
-"""Cliente de automacao do PJe-TJPI (1o Grau) via Playwright.
+"""Cliente de automacao do PJe-TJPI (1o e 2o graus) via Playwright.
 
 Funcionalidades:
 - Login automatico (CPF + senha + 2FA TOTP)

@@ -1,9 +1,10 @@
-"""Servidor MCP para consultas no PJe-TJPI - 1o GRAU.
+"""Servidor MCP para consultas no PJe-TJPI - 1o E 2o GRAUS.
 
-Este MCP acessa EXCLUSIVAMENTE o 1o grau (varas) do Tribunal de Justica
-do Piaui. Para 2o grau (cameras, acordaos, recursos), use outro MCP.
+Um unico servidor atende as duas instancias do Tribunal de Justica do
+Piaui: 1g (varas, pje.tjpi.jus.br/1g) e 2g (cameras/turmas,
+pje.tjpi.jus.br/2g). Toda tool aceita o parametro 'grau' ('1'/'2').
 
-Tools disponiveis (22):
+Tools disponiveis (24):
   CONSULTA:
     - expedientes_pendentes, verificar_prazos_urgentes
     - consultar_processo, ultimas_movimentacoes, relatorio_processo
@@ -13,10 +14,12 @@ Tools disponiveis (22):
 
   CONSULTA PONTUAL (sem download):
     - ultima_decisao, ultimo_despacho, pendencias_processo
+    - expedientes_do_processo
 
   DOWNLOAD:
     - baixar_documento (1 doc especifico)
     - baixar_processo (autos completos via download nativo do PJe)
+    - status_download (acompanha download em background)
     - preparar_processo (baixa + decide pdf_direto vs notebooklm)
 
   MODELOS E MINUTAS:
