@@ -1,5 +1,5 @@
 <h1 align="center">
-    <img alt="MCP PJe-TJPI" src="https://raw.githubusercontent.com/fxbarros/MCP-PJe-TJPI-1g/main/docs/assets/banner.svg?sanitize=true">
+    <img alt="MCP PJe-TJPI" src="https://raw.githubusercontent.com/fxbarros/MCP-PJe-TJPI/main/docs/assets/banner.svg?sanitize=true">
     <br>
     <small>Expedientes, prazos e autos do PJe em linguagem natural — sem nunca escrever no tribunal</small>
 </h1>
@@ -98,7 +98,7 @@ Todas aceitam os parâmetros opcionais `persona` (`"advogado"` padrão ou `"proc
 ### 1) Clone o repositório
 
 ```bash
-git clone https://github.com/fxbarros/MCP-PJe-TJPI-1g.git mcp-pje-tjpi-1g
+git clone https://github.com/fxbarros/MCP-PJe-TJPI.git mcp-pje-tjpi-1g
 cd mcp-pje-tjpi-1g
 ```
 
