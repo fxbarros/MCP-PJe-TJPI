@@ -6,7 +6,7 @@
 
 <p align="center">
     <img alt="Python" src="https://img.shields.io/badge/python-3.10+-3776AB?logo=python&logoColor=white">
-    <img alt="Ferramentas" src="https://img.shields.io/badge/ferramentas-22-brightgreen">
+    <img alt="Ferramentas" src="https://img.shields.io/badge/ferramentas-24-brightgreen">
     <img alt="MCP" src="https://img.shields.io/badge/MCP-Claude%20Desktop-d97757">
     <img alt="Login" src="https://img.shields.io/badge/login-CPF%20%2B%20senha%20%2B%20TOTP%20autom%C3%A1tico-black">
     <img alt="Somente leitura" src="https://img.shields.io/badge/PJe-somente%20leitura-8b0000">
@@ -15,7 +15,7 @@
 <p align="center">
     <a href="#-funcionalidades"><strong>Funcionalidades</strong></a>
     &middot;
-    <a href="#%EF%B8%8F-as-22-ferramentas"><strong>Ferramentas</strong></a>
+    <a href="#%EF%B8%8F-as-24-ferramentas"><strong>Ferramentas</strong></a>
     &middot;
     <a href="#-instala%C3%A7%C3%A3o"><strong>Instalação</strong></a>
     &middot;

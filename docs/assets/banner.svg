@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" role="img" aria-label="MCP PJe-TJPI 1º Grau">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 360" role="img" aria-label="MCP PJe-TJPI 1º e 2º Graus">
   <!-- Arte original (sumi-ê): samurai ao entardecer num campo de batalha.
        MARCA dos projetos MCP de Fábio Ximenes Barros — a cena é a mesma
        em todos os repositórios; só título e tagline mudam. -->
@@ -92,9 +92,9 @@
 
   <!-- título -->
   <g font-family="Iowan Old Style, Palatino, Georgia, serif">
-    <text x="72" y="150" font-size="58" font-weight="700" fill="#f3ead9" letter-spacing="1">MCP PJe‑TJPI · 1º Grau</text>
+    <text x="72" y="150" font-size="58" font-weight="700" fill="#f3ead9" letter-spacing="1">MCP PJe‑TJPI · 1º e 2º Graus</text>
     <text x="74" y="192" font-size="23" fill="#d8b48e">O PJe do TJ‑PI no Claude — expedientes, prazos e autos em linguagem natural</text>
-    <text x="74" y="224" font-size="17" fill="#9c7f68">login CPF + senha + TOTP automatizado · personas advogado/procurador · nenhuma escrita no PJe</text>
+    <text x="74" y="224" font-size="17" fill="#9c7f68">login CPF + senha + TOTP automatizado · personas advogado/procurador · 1º e 2º graus · nenhuma escrita no PJe</text>
   </g>
   <rect x="74" y="240" width="340" height="3" fill="#a91f22"/>
 </svg>
